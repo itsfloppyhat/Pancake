@@ -107,6 +107,25 @@ struct RunSegment: Identifiable, Codable, Equatable, Hashable {
     }
 }
 
+// MARK: - WorkoutDataPoint
+struct WorkoutDataPoint: Codable, Equatable, Hashable {
+    let timestamp: TimeInterval      // seconds since workout start
+    let heartRate: Int?
+    let cadence: Double?
+    let distanceMeters: Double
+    let paceSecondsPerKm: Double?    // nil if distance is 0
+    let currentSongTitle: String?
+    let currentSongArtist: String?
+}
+
+// MARK: - SongPeriod
+struct SongPeriod: Codable, Equatable, Hashable {
+    let songTitle: String
+    let artist: String
+    let startTimestamp: TimeInterval  // seconds since workout start
+    let endTimestamp: TimeInterval?   // nil if still playing when workout ended
+}
+
 // MARK: - RunEvent
 struct RunEvent: Identifiable, Codable, Equatable, Hashable {
     let id: UUID
@@ -114,13 +133,32 @@ struct RunEvent: Identifiable, Codable, Equatable, Hashable {
     let totalDistanceMeters: Int
     let totalTimeSeconds: Int
     let segments: [RunSegment]
+    let dataPoints: [WorkoutDataPoint]
+    let songHistory: [SongPeriod]
 
-    init(id: UUID = UUID(), date: Date = Date(), totalDistanceMeters: Int, totalTimeSeconds: Int, segments: [RunSegment]) {
+    enum CodingKeys: String, CodingKey {
+        case id, date, totalDistanceMeters, totalTimeSeconds, segments, dataPoints, songHistory
+    }
+
+    init(id: UUID = UUID(), date: Date = Date(), totalDistanceMeters: Int, totalTimeSeconds: Int, segments: [RunSegment], dataPoints: [WorkoutDataPoint] = [], songHistory: [SongPeriod] = []) {
         self.id = id
         self.date = date
         self.totalDistanceMeters = totalDistanceMeters
         self.totalTimeSeconds = totalTimeSeconds
         self.segments = segments
+        self.dataPoints = dataPoints
+        self.songHistory = songHistory
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        date = try container.decode(Date.self, forKey: .date)
+        totalDistanceMeters = try container.decode(Int.self, forKey: .totalDistanceMeters)
+        totalTimeSeconds = try container.decode(Int.self, forKey: .totalTimeSeconds)
+        segments = try container.decode([RunSegment].self, forKey: .segments)
+        dataPoints = try container.decodeIfPresent([WorkoutDataPoint].self, forKey: .dataPoints) ?? []
+        songHistory = try container.decodeIfPresent([SongPeriod].self, forKey: .songHistory) ?? []
     }
 
     var effortSummary: String {
@@ -141,6 +179,16 @@ struct RunEvent: Identifiable, Codable, Equatable, Hashable {
         let minutes = Int(pace) / 60
         let seconds = Int(pace) % 60
         return String(format: "%d:%02d/km", minutes, seconds)
+    }
+
+    var averageHeartRate: Int? {
+        let hrPoints = dataPoints.compactMap { $0.heartRate }
+        guard !hrPoints.isEmpty else { return nil }
+        return hrPoints.reduce(0, +) / hrPoints.count
+    }
+
+    var hasDetailedData: Bool {
+        !dataPoints.isEmpty
     }
 
     func hash(into hasher: inout Hasher) {
@@ -173,6 +221,41 @@ enum WatchMessageType: String, CaseIterable {
 
     // Health Data
     case workoutHeartRate = "workoutHeartRate"
+}
+
+// MARK: - Target Convenience Extensions
+extension Target {
+    var isTime: Bool {
+        if case .time = self { return true }
+        return false
+    }
+
+    var isDistance: Bool {
+        if case .distance = self { return true }
+        return false
+    }
+
+    var timeSeconds: Int {
+        if case .time(let seconds) = self { return seconds }
+        return 0
+    }
+
+    var distanceMeters: Int {
+        if case .distance(let meters) = self { return meters }
+        return 0
+    }
+}
+
+// MARK: - RunSegment Extensions
+extension RunSegment {
+    var targetDuration: TimeInterval {
+        switch target {
+        case .time(let seconds):
+            return TimeInterval(seconds)
+        case .distance:
+            return 0
+        }
+    }
 }
 
 // MARK: - Formatting Extensions
@@ -212,65 +295,5 @@ extension Int {
         } else {
             return "\(self) m"
         }
-    }
-}
-
-// MARK: - Target Convenience Extensions
-extension Target {
-    var isTime: Bool {
-        if case .time = self { return true }
-        return false
-    }
-
-    var isDistance: Bool {
-        if case .distance = self { return true }
-        return false
-    }
-
-    var timeSeconds: Int {
-        if case .time(let seconds) = self { return seconds }
-        return 0
-    }
-
-    var distanceMeters: Int {
-        if case .distance(let meters) = self { return meters }
-        return 0
-    }
-}
-
-// MARK: - RunSegment Extensions
-extension RunSegment {
-    var targetDuration: TimeInterval {
-        switch target {
-        case .time(let seconds):
-            return TimeInterval(seconds)
-        case .distance:
-            return 0
-        }
-    }
-}
-
-// MARK: - Music Models (for WatchConnectivity decoding)
-struct MusicSong: Identifiable, Codable, Equatable {
-    let id: String
-    let title: String
-    let artist: String
-    let album: String?
-    let artwork: URL?
-    let duration: TimeInterval
-    let tempo: Int?
-    let energy: Double?
-    let valence: Double?
-
-    init(id: String, title: String, artist: String, album: String? = nil, artwork: URL? = nil, duration: TimeInterval, tempo: Int? = nil, energy: Double? = nil, valence: Double? = nil) {
-        self.id = id
-        self.title = title
-        self.artist = artist
-        self.album = album
-        self.artwork = artwork
-        self.duration = duration
-        self.tempo = tempo
-        self.energy = energy
-        self.valence = valence
     }
 }

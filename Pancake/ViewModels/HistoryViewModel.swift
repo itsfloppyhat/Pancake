@@ -1,6 +1,5 @@
 import Foundation
 import Combine
-import HealthKit
 
 // MARK: - History ViewModel
 @MainActor

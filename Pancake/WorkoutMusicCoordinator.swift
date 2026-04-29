@@ -1,25 +1,5 @@
 import Foundation
 import Combine
-import AVFoundation
-
-// MARK: - Speech Delegate
-final class SpeechDelegate: NSObject, AVSpeechSynthesizerDelegate {
-    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didStart utterance: AVSpeechUtterance) {
-        print("🎤 Speech started: \(utterance.speechString)")
-    }
-    
-    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
-        print("🎤 Speech finished: \(utterance.speechString)")
-    }
-    
-    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
-        print("🎤 Speech cancelled: \(utterance.speechString)")
-    }
-    
-    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, willSpeakRangeOfSpeechString characterRange: NSRange, utterance: AVSpeechUtterance) {
-        print("🎤 Speech speaking range: \(characterRange)")
-    }
-}
 
 // MARK: - Workout Music Coordinator
 @MainActor
@@ -29,25 +9,60 @@ final class WorkoutMusicCoordinator: ObservableObject {
     @Published var isWorkoutActive = false
     @Published var currentWorkoutContext: WorkoutContext?
     @Published var lastMusicSuggestion: MusicSuggestion?
-    
+    @Published var liveMetricsWarning: String?
+
+    /// Segments waiting for Watch to confirm workout started before music begins
+    private var pendingRunPlanSegments: [RunSegment]?
+
     private let musicManager = MusicPlaybackManager.shared
-    private let chatGPTService = ChatGPTService.shared
+    private let aiService = MusicAIService.shared
     private let profileManager = UserProfileManager.shared
     private let watchConnectivity = WatchConnectivityManager.shared
     private var cancellables = Set<AnyCancellable>()
-    
-    // Speech synthesis
-    private let speechSynthesizer = AVSpeechSynthesizer()
-    private let speechDelegate = SpeechDelegate()
+
+
+    // Time-series recording
+    private var workoutStartTime: Date?
+    private var workoutDataPoints: [WorkoutDataPoint] = []
+    private var songHistory: [SongPeriod] = []
+    private var recordingTimer: Timer?
+    private var lastRecordedSongID: String?
+    private var liveMetricsMonitorTimer: Timer?
+    private var lastHeartRateSampleAt: Date?
+    private var isLiveMetricsWarningDismissed = false
+
+    // Song pre-fetching
+    private var prefetchedSuggestions: [MusicSuggestion] = []
+    private var prefetchTimer: Timer?
+    private var isPrefetching = false
+    private var songEndCheckTimer: Timer?
+    private var isAdvancingSong = false
+    private var lastSongAdvanceAt: Date = .distantPast
+    private var lastAutomaticSongAdvanceAttemptAt: Date = .distantPast
+
+    // Session-wide played songs tracking (prevents repeats)
+    private var playedSongsThisSession: Set<String> = []
+    private var unavailableSongsThisSession: Set<String> = []
+    private var recentHeartRateSamples: [Int] = []
+    private var recentPlayedSongs: [MusicSong] = []
+    private static let maximumSuggestionAttempts = 4
+    private static let maximumPlayableSuggestionAttempts = 3
+    private static let maximumHeartRateSamples = 5
+    private static let maximumRecentSongs = 5
+    private static let preferredPrefetchDepth = 2
+    private static let minimumAutomaticAdvanceInterval: TimeInterval = 10
+    private static let minimumAutomaticAdvanceAttemptInterval: TimeInterval = 15
+    private static let liveHeartRateGracePeriod: TimeInterval = 90
+
+    // Fartlek detection
+    private var isFartlekWorkout = false
+    /// Minimum segment duration (in seconds) required to trigger a song change on segment transition.
+    /// Segments shorter than this inherit the current song.
+    private static let minimumSegmentDurationForSongChange: TimeInterval = 90
     
     private init() {
         setupWatchConnectivity()
         setupMusicManager()
-        setupSpeechSynthesizer()
-    }
-    
-    private func setupSpeechSynthesizer() {
-        speechSynthesizer.delegate = speechDelegate
     }
     
     // MARK: - Setup
@@ -82,10 +97,19 @@ final class WorkoutMusicCoordinator: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] notification in
-            if let message = notification.object as? [String: Any],
-               let action = message["action"] as? String {
+            guard let message = notification.object as? [String: Any] else { return }
+
+            // Handle messages that use the "action" key (e.g. end, pause)
+            if let action = message["action"] as? String {
                 Task { @MainActor in
                     self?.handleWorkoutControl(action)
+                }
+            }
+
+            // Handle messages that use the "type" key (workoutStarted, workoutCompleted)
+            if let type = message["type"] as? String {
+                Task { @MainActor in
+                    self?.handleWorkoutControlByType(type, message: message)
                 }
             }
         }
@@ -115,6 +139,18 @@ final class WorkoutMusicCoordinator: ObservableObject {
                 }
             }
         }
+
+        NotificationCenter.default.addObserver(
+            forName: .workoutUpdate,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            if let message = notification.object as? [String: Any] {
+                Task { @MainActor in
+                    self?.handleWorkoutUpdate(message)
+                }
+            }
+        }
     }
     
     private func setupMusicManager() {
@@ -122,31 +158,74 @@ final class WorkoutMusicCoordinator: ObservableObject {
         musicManager.$currentSong
             .sink { [weak self] song in
                 self?.sendCurrentSongToWatch(song)
+                self?.trackSongChange(song)
             }
             .store(in: &cancellables)
-        
+
         musicManager.$isPlaying
             .sink { [weak self] isPlaying in
-                self?.sendPlaybackStateToWatch(isPlaying)
+                self?.sendPlaybackStateToWatch(isPlaying, state: self?.musicManager.playbackStateDescription ?? "stopped")
+            }
+            .store(in: &cancellables)
+
+        musicManager.$playbackStateDescription
+            .sink { [weak self] state in
+                guard let self else { return }
+                self.sendPlaybackStateToWatch(self.musicManager.isPlaying, state: state)
             }
             .store(in: &cancellables)
     }
     
+    // MARK: - Pending Run Plan (deferred music start)
+
+    /// Store segments from the iPhone run setup. Music will NOT start until
+    /// the Watch sends a `workoutStarted` confirmation message.
+    func setPendingRunPlan(_ segments: [RunSegment]) {
+        pendingRunPlanSegments = segments
+    }
+
     // MARK: - Workout Management
-    
+
     func startWorkoutMusic(segments: [RunSegment]) {
-        print("🎵 WorkoutMusicCoordinator.startWorkoutMusic called with \(segments.count) segments")
-        
-        guard !isWorkoutActive else { 
-            print("⚠️ Workout already active, ignoring start request")
-            return 
+
+        guard !isWorkoutActive else {
+            return
         }
-        
+
         isWorkoutActive = true
-        print("✅ Workout marked as active")
-        
+        musicManager.coordinatorDriven = true
+
+        // Start time-series recording
+        workoutStartTime = Date()
+        workoutDataPoints = []
+        songHistory = []
+        lastRecordedSongID = nil
+        lastHeartRateSampleAt = nil
+        liveMetricsWarning = nil
+        isLiveMetricsWarningDismissed = false
+        startRecordingTimer()
+        startLiveMetricsMonitorTimer()
+
+        // Reset pre-fetch and session tracking
+        prefetchedSuggestions.removeAll()
+        isPrefetching = false
+        isAdvancingSong = false
+        lastSongAdvanceAt = .distantPast
+        lastAutomaticSongAdvanceAttemptAt = .distantPast
+        playedSongsThisSession.removeAll()
+        unavailableSongsThisSession.removeAll()
+        recentHeartRateSamples.removeAll()
+        recentPlayedSongs.removeAll()
+        lastMusicSuggestion = nil
+        liveMetricsWarning = nil
+        isLiveMetricsWarningDismissed = false
+        aiService.beginVarietySession()
+
+        // Detect if this is a fartlek-style workout
+        isFartlekWorkout = detectFartlekWorkout(segments: segments)
+
         // Create initial workout context
-        let context = WorkoutContext(
+        let context = makeWorkoutContext(
             segments: segments,
             currentSegmentIndex: 0,
             totalDistance: 0,
@@ -154,40 +233,55 @@ final class WorkoutMusicCoordinator: ObservableObject {
             heartRate: nil,
             targetHeartRate: nil
         )
-        
+
         currentWorkoutContext = context
-        print("📊 Workout context created")
-        
+
         // Start music playback immediately
-        print("🎵 Starting music manager...")
         musicManager.startWorkoutMusic(workoutContext: context)
-        
-        // Send workout start to watch (if available)
-        sendWorkoutStartToWatch(segments: segments)
-        
-        // Generate starting song suggestion
-        print("🤖 Starting ChatGPT song generation...")
+
+        // Generate the first song, then start pre-fetching
         Task {
             await generateStartingSong()
-        }
-        
-        // Generate and play motivational speech after 10 seconds
-        print("🎤 Scheduling motivational speech in 10 seconds...")
-        Task {
-            await generateAndPlayMotivationalSpeech()
-            print("✅ Initial motivational speech completed successfully")
+            startPrefetchTimer()
+            startSongEndCheckTimer()
         }
     }
     
     func stopWorkoutMusic() {
         guard isWorkoutActive else { return }
-        
+
+        // Stop recording timer
+        stopRecordingTimer()
+        stopLiveMetricsMonitorTimer()
+
+        // Stop pre-fetch timers
+        stopPrefetchTimer()
+        stopSongEndCheckTimer()
+
+        // Close the final song period
+        closeFinalSongPeriod()
+
         isWorkoutActive = false
+        musicManager.coordinatorDriven = false
         currentWorkoutContext = nil
-        
+        prefetchedSuggestions.removeAll()
+        isPrefetching = false
+        isAdvancingSong = false
+        lastSongAdvanceAt = .distantPast
+        lastAutomaticSongAdvanceAttemptAt = .distantPast
+        recentHeartRateSamples.removeAll()
+        recentPlayedSongs.removeAll()
+        playedSongsThisSession.removeAll()
+        unavailableSongsThisSession.removeAll()
+        lastMusicSuggestion = nil
+        lastHeartRateSampleAt = nil
+        liveMetricsWarning = nil
+        isLiveMetricsWarningDismissed = false
+        aiService.endVarietySession()
+
         // Stop music playback
         musicManager.stopWorkoutMusic()
-        
+
         // Send workout stop to watch
         sendWorkoutStopToWatch()
     }
@@ -201,7 +295,7 @@ final class WorkoutMusicCoordinator: ObservableObject {
     ) {
         guard let context = currentWorkoutContext else { return }
         
-        let updatedContext = WorkoutContext(
+        let updatedContext = makeWorkoutContext(
             segments: context.segments,
             currentSegmentIndex: currentSegmentIndex,
             totalDistance: totalDistance,
@@ -221,215 +315,487 @@ final class WorkoutMusicCoordinator: ObservableObject {
     }
     
     private func checkForDistanceMilestone(previousDistance: Double, newDistance: Double) {
-        // Only trigger for single segment workouts
-        guard let context = currentWorkoutContext, context.segments.count == 1 else { return }
-        
-        let previousKm = Int(previousDistance / 1000)
-        let newKm = Int(newDistance / 1000)
-        
-        // Check if we've crossed a kilometer milestone
-        if newKm > previousKm && newKm > 0 {
-            print("🎤 Distance milestone reached: \(newKm)km")
-            Task {
-                await generateAndPlayWorkoutMotivation(
-                    segmentChange: false,
-                    distanceMilestone: true
-                )
-            }
-        }
+        // Km milestones are now handled on the Watch side with haptic feedback
     }
     
     // MARK: - Music Suggestion Generation
     
     func generateStartingSong() async {
+        guard beginSongAdvance(isAutomatic: false) else { return }
+        defer { finishSongAdvance() }
+
         guard let context = currentWorkoutContext else { return }
-        
-        do {
-            let suggestion = try await chatGPTService.generateStartingSongSuggestion(
+
+        let intensity = effectiveIntensity(
+            at: context.currentSegmentIndex,
+            segments: context.segments
+        )
+
+        let played = await resolveAndPlaySuggestion(fallbackIntensity: intensity) {
+            try await self.aiService.generateStartingSongSuggestion(
                 workoutPlan: context.segments,
-                userPreferences: profileManager.userProfile.musicPreferences,
-                currentIntensity: context.currentSegment.intensity
+                userPreferences: self.profileManager.userProfile.musicPreferences,
+                currentIntensity: intensity,
+                isFartlek: self.isFartlekWorkout,
+                mustUseLibrary: self.mustUseLibrarySuggestions
             )
-            
-            lastMusicSuggestion = suggestion
-            await playSuggestedSong(suggestion)
-            
-        } catch {
-            print("Failed to generate starting song: \(error)")
+        }
+
+        if played {
+            triggerPrefetch()
         }
     }
     
     func generateNextSong() async {
+        guard beginSongAdvance(isAutomatic: true) else { return }
+        defer { finishSongAdvance() }
+
+        // If we have a pre-fetched suggestion, use it immediately
+        if let prefetched = takePrefetchedSuggestion(),
+           await playSuggestedSong(prefetched) {
+            triggerPrefetch()
+            return
+        }
+
+        // No pre-fetched song — generate one now
         guard let context = currentWorkoutContext else { return }
-        
-        do {
-            let suggestion = try await chatGPTService.generateIntervalChangeSuggestion(
+
+        // For fartlek workouts, compute the effective intensity using the lookahead window
+        let upcomingIntensity: Intensity? = if isFartlekWorkout {
+            effectiveIntensity(at: context.currentSegmentIndex, segments: context.segments)
+        } else {
+            context.upcomingSegment?.intensity
+        }
+
+        let fallbackIntensity = upcomingIntensity ?? context.currentSegment.intensity
+
+        let played = await resolveAndPlaySuggestion(fallbackIntensity: fallbackIntensity) {
+            try await self.aiService.generateIntervalChangeSuggestion(
                 context: context.musicContext,
-                userPreferences: profileManager.userProfile.musicPreferences,
+                userPreferences: self.profileManager.userProfile.musicPreferences,
                 currentDistance: context.totalDistance,
                 currentTime: context.totalTime,
-                upcomingIntensity: context.upcomingSegment?.intensity
+                upcomingIntensity: upcomingIntensity,
+                isFartlek: self.isFartlekWorkout,
+                mustUseLibrary: self.mustUseLibrarySuggestions
             )
-            
-            lastMusicSuggestion = suggestion
-            await playSuggestedSong(suggestion)
-            
-        } catch {
-            print("Failed to generate next song: \(error)")
+        }
+
+        if played {
+            triggerPrefetch()
         }
     }
-    
-    private func playSuggestedSong(_ suggestion: MusicSuggestion) async {
-        // This will be handled by the MusicPlaybackManager
-        // We just need to trigger the search and playback
-        await musicManager.generateNextSongSuggestion()
-    }
-    
-    private func generateAndPlayMotivationalSpeech() async {
-        print("🎤 Starting motivational speech generation...")
-        
-        guard let context = currentWorkoutContext else { 
-            print("❌ No workout context available for motivational speech")
-            return 
+
+    /// User-initiated "new song" request from the Watch button.
+    /// Uses pre-fetched song if available for instant response.
+    func generateNextSongUserRequested() async {
+        guard beginSongAdvance(isAutomatic: false) else { return }
+        defer { finishSongAdvance() }
+
+        // If we have a pre-fetched suggestion, play it immediately
+        if let prefetched = takePrefetchedSuggestion(),
+           await playSuggestedSong(prefetched) {
+            triggerPrefetch()
+            return
         }
-        
-        print("🎤 Workout context found, generating speech for \(context.segments.count) segments")
-        
-        do {
-            let speech = try await chatGPTService.generateMotivationalSpeech(workoutPlan: context.segments)
-            print("🎤 Generated motivational speech: \(speech)")
-            
-            // Play the speech with faded music
-            await playMotivationalSpeech(speech)
-            
-        } catch {
-            print("❌ Failed to generate motivational speech: \(error)")
-        }
-    }
-    
-    private func playMotivationalSpeech(_ speech: String) async {
-        // Wait 10 seconds before starting speech
-        print("🎤 Waiting 10 seconds before starting motivational speech...")
-        try? await Task.sleep(nanoseconds: 10_000_000_000) // 10 seconds
-        
-        print("🎤 10 seconds elapsed, starting speech playback...")
-        
-        await MainActor.run {
-            // Fade out music for speech
-            print("🎵 Fading out music for speech...")
-            musicManager.fadeOutMusic()
-        }
-        
-        // Wait a moment for fade to complete
-        try? await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
-        
-        await MainActor.run {
-            // Use the retained AVSpeechSynthesizer for text-to-speech
-            let utterance = AVSpeechUtterance(string: speech)
-            utterance.rate = 0.5 // Slower rate for motivational speech
-            utterance.volume = 0.8
-            
-            // Try to get a good voice
-            if let voice = AVSpeechSynthesisVoice(language: "en-US") {
-                utterance.voice = voice
-                print("🎤 Using voice: \(voice.name)")
-            } else {
-                print("⚠️ Could not get en-US voice, using default")
-            }
-            
-            print("🎤 Playing motivational speech: \(speech)")
-            print("🎤 Speech rate: \(utterance.rate), volume: \(utterance.volume)")
-            
-            // Stop any current speech and start new one
-            speechSynthesizer.stopSpeaking(at: .immediate)
-            speechSynthesizer.speak(utterance)
-        }
-        
-        // Wait for speech to complete (estimate based on speech length + buffer)
-        let estimatedDuration = Double(speech.count) * 0.1 + 1.0 // 1 second buffer
-        print("🎤 Waiting \(estimatedDuration) seconds for speech to complete...")
-        try? await Task.sleep(nanoseconds: UInt64(estimatedDuration * 1_000_000_000))
-        
-        await MainActor.run {
-            // Fade music back in after speech
-            print("🎵 Fading music back in after speech...")
-            musicManager.fadeInMusic()
-        }
-        
-        print("🎤 Motivational speech completed")
-    }
-    
-    private func generateAndPlayWorkoutMotivation(
-        segmentChange: Bool,
-        distanceMilestone: Bool
-    ) async {
+
         guard let context = currentWorkoutContext else { return }
-        
-        do {
-            let motivation = try await chatGPTService.generateWorkoutMotivation(
-                segmentChange: segmentChange,
-                distanceMilestone: distanceMilestone,
-                currentIntensity: context.currentSegment.intensity,
-                heartRate: context.musicContext.currentHeartRate,
-                totalDistance: context.totalDistance
+
+        let upcomingIntensity: Intensity? = if isFartlekWorkout {
+            effectiveIntensity(at: context.currentSegmentIndex, segments: context.segments)
+        } else {
+            context.upcomingSegment?.intensity
+        }
+
+        let fallbackIntensity = upcomingIntensity ?? context.currentSegment.intensity
+
+        let played = await resolveAndPlaySuggestion(fallbackIntensity: fallbackIntensity) {
+            try await self.aiService.generateIntervalChangeSuggestion(
+                context: context.musicContext,
+                userPreferences: self.profileManager.userProfile.musicPreferences,
+                currentDistance: context.totalDistance,
+                currentTime: context.totalTime,
+                upcomingIntensity: upcomingIntensity,
+                isFartlek: self.isFartlekWorkout,
+                mustUseLibrary: self.mustUseLibrarySuggestions
             )
-            
-            print("🎤 Generated workout motivation: \(motivation)")
-            await playWorkoutMotivation(motivation)
-            
-        } catch {
-            print("Failed to generate workout motivation: \(error)")
+        }
+
+        if played {
+            triggerPrefetch()
         }
     }
-    
-    private func playWorkoutMotivation(_ motivation: String) async {
-        await MainActor.run {
-            // Fade out music for motivation
-            print("🎵 Fading out music for motivation...")
-            musicManager.fadeOutMusic()
-        }
-        
-        // Wait a moment for fade to complete
-        try? await Task.sleep(nanoseconds: 500_000_000) // 0.5 seconds
-        
-        await MainActor.run {
-            // Use the retained AVSpeechSynthesizer for text-to-speech
-            let utterance = AVSpeechUtterance(string: motivation)
-            utterance.rate = 0.6 // Slightly faster for shorter messages
-            utterance.volume = 0.8
-            
-            // Try to get a good voice
-            if let voice = AVSpeechSynthesisVoice(language: "en-US") {
-                utterance.voice = voice
+
+    // MARK: - Song Pre-fetching
+
+    private func startPrefetchTimer() {
+        stopPrefetchTimer()
+        prefetchTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.triggerPrefetch()
             }
-            
-            print("🎤 Playing workout motivation: \(motivation)")
-            
-            // Stop any current speech and start new one
-            speechSynthesizer.stopSpeaking(at: .immediate)
-            speechSynthesizer.speak(utterance)
         }
-        
-        // Wait for motivation to complete (shorter duration for shorter messages)
-        let estimatedDuration = Double(motivation.count) * 0.08 + 1.0 // Shorter buffer
-        print("🎤 Waiting \(estimatedDuration) seconds for motivation to complete...")
-        try? await Task.sleep(nanoseconds: UInt64(estimatedDuration * 1_000_000_000))
-        
-        await MainActor.run {
-            // Fade music back in after motivation
-            print("🎵 Fading music back in after motivation...")
-            musicManager.fadeInMusic()
+    }
+
+    private func stopPrefetchTimer() {
+        prefetchTimer?.invalidate()
+        prefetchTimer = nil
+    }
+
+    /// Start a pre-fetch in the background (non-blocking)
+    private func triggerPrefetch() {
+        guard isWorkoutActive,
+              !isPrefetching,
+              prefetchedSuggestions.count < Self.preferredPrefetchDepth else { return }
+
+        Task {
+            await prefetchNextSong()
         }
-        
-        print("🎤 Workout motivation completed")
+    }
+
+    private func prefetchNextSong() async {
+        guard let context = currentWorkoutContext else { return }
+        guard !isPrefetching else { return }
+
+        isPrefetching = true
+
+        let upcomingIntensity: Intensity? = if isFartlekWorkout {
+            effectiveIntensity(at: context.currentSegmentIndex, segments: context.segments)
+        } else {
+            context.upcomingSegment?.intensity
+        }
+
+        if let suggestion = await requestPrefetchSuggestion(
+            context: context,
+            upcomingIntensity: upcomingIntensity
+        ) {
+            let songKey = suggestion.sessionSongKey
+            let reservedKeys = Set(prefetchedSuggestions.map(\.sessionSongKey))
+
+            if !reservedKeys.contains(songKey) {
+                prefetchedSuggestions.append(suggestion)
+            }
+        }
+
+        isPrefetching = false
+
+        if isWorkoutActive, prefetchedSuggestions.count < Self.preferredPrefetchDepth {
+            triggerPrefetch()
+        }
+    }
+
+    private func requestPrefetchSuggestion(
+        context: WorkoutContext,
+        upcomingIntensity: Intensity?
+    ) async -> MusicSuggestion? {
+        let fallbackIntensity = upcomingIntensity ?? context.currentSegment.intensity
+
+        return await resolveUniqueSuggestion(fallbackIntensity: fallbackIntensity) {
+            try await self.aiService.generateIntervalChangeSuggestion(
+                context: context.musicContext,
+                userPreferences: self.profileManager.userProfile.musicPreferences,
+                currentDistance: context.totalDistance,
+                currentTime: context.totalTime,
+                upcomingIntensity: upcomingIntensity,
+                isFartlek: self.isFartlekWorkout,
+                mustUseLibrary: self.mustUseLibrarySuggestions
+            )
+        }
+    }
+
+    // MARK: - Song End Detection
+
+    private func startSongEndCheckTimer() {
+        stopSongEndCheckTimer()
+        // Check every 3 seconds if the song is about to end or has ended
+        songEndCheckTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.checkForSongEnd()
+            }
+        }
+    }
+
+    private func stopSongEndCheckTimer() {
+        songEndCheckTimer?.invalidate()
+        songEndCheckTimer = nil
+    }
+
+    private func checkForSongEnd() {
+        guard isWorkoutActive else { return }
+        guard !isAdvancingSong else { return }
+
+        let timeRemaining = musicManager.currentSongDuration - musicManager.currentPlaybackTime
+        let hasNoSong = musicManager.currentSong == nil
+        let songEnding = timeRemaining > 0 && timeRemaining <= 5.0 // Within 5 seconds of ending
+        let songEnded = musicManager.currentSongDuration > 0 && musicManager.currentPlaybackTime >= musicManager.currentSongDuration - 0.5
+        let playbackStopped = !musicManager.isPlaying && musicManager.currentSong != nil && musicManager.currentSongDuration > 0
+
+        if musicManager.currentSong != nil,
+           musicManager.currentPlaybackTime > 0,
+           musicManager.currentPlaybackTime < Self.minimumAutomaticAdvanceInterval {
+            return
+        }
+
+        if hasNoSong || songEnding || songEnded || playbackStopped {
+            Task {
+                await generateNextSong()
+            }
+        }
     }
     
+    @discardableResult
+    private func playSuggestedSong(_ suggestion: MusicSuggestion) async -> Bool {
+        let cleaned = suggestion.cleanedTitle()
+        let songKey = cleaned.sessionSongKey
+
+        guard !excludedSongKeys.contains(songKey) else {
+            return false
+        }
+
+        let didStartPlaying = await musicManager.playSuggestedSong(cleaned)
+        guard didStartPlaying else {
+            unavailableSongsThisSession.insert(songKey)
+            return false
+        }
+
+        playedSongsThisSession.insert(songKey)
+        if let actualSongKey = musicManager.currentSong?.sessionSongKey {
+            playedSongsThisSession.insert(actualSongKey)
+        }
+        unavailableSongsThisSession.remove(songKey)
+        lastMusicSuggestion = cleaned
+        return true
+    }
+
+    private func resolveUniqueSuggestion(
+        fallbackIntensity: Intensity,
+        generator: @escaping () async throws -> MusicSuggestion
+    ) async -> MusicSuggestion? {
+        do {
+            if let suggestion = try await requestUniqueSuggestion(generator: generator) {
+                return suggestion
+            }
+        } catch {
+            print("Suggestion generation fell back: \(error)")
+        }
+
+        let fallback = aiService.fallbackSuggestion(
+            preferences: profileManager.userProfile.musicPreferences,
+            intensity: fallbackIntensity,
+            avoiding: reservedSongKeys
+        ).cleanedTitle()
+        aiService.registerSessionSuggestion(fallback)
+
+        guard !reservedSongKeys.contains(fallback.sessionSongKey) else {
+            return nil
+        }
+
+        return fallback
+    }
+
+    private func resolveAndPlaySuggestion(
+        fallbackIntensity: Intensity,
+        generator: @escaping () async throws -> MusicSuggestion
+    ) async -> Bool {
+        for _ in 0..<Self.maximumPlayableSuggestionAttempts {
+            guard let suggestion = await resolveUniqueSuggestion(
+                fallbackIntensity: fallbackIntensity,
+                generator: generator
+            ) else {
+                break
+            }
+
+            if await playSuggestedSong(suggestion) {
+                return true
+            }
+        }
+
+        if let emergencySuggestion = await musicManager.playEmergencyFallback(
+            preferences: profileManager.userProfile.musicPreferences,
+            intensity: fallbackIntensity,
+            avoiding: reservedSongKeys
+        ) {
+            let songKey = emergencySuggestion.sessionSongKey
+            playedSongsThisSession.insert(songKey)
+            if let actualSongKey = musicManager.currentSong?.sessionSongKey {
+                playedSongsThisSession.insert(actualSongKey)
+            }
+            unavailableSongsThisSession.remove(songKey)
+            aiService.registerSessionSuggestion(emergencySuggestion)
+            lastMusicSuggestion = emergencySuggestion
+            return true
+        }
+
+        return false
+    }
+
+    private func requestUniqueSuggestion(
+        maxAttempts: Int? = nil,
+        generator: () async throws -> MusicSuggestion
+    ) async throws -> MusicSuggestion? {
+        let maxAttempts = maxAttempts ?? Self.maximumSuggestionAttempts
+        var attemptedKeys = Set<String>()
+
+        for _ in 0..<maxAttempts {
+            let suggestion = (try await generator()).cleanedTitle()
+            let songKey = suggestion.sessionSongKey
+
+            guard !reservedSongKeys.contains(songKey),
+                  attemptedKeys.insert(songKey).inserted else {
+                continue
+            }
+
+            return suggestion
+        }
+
+        return nil
+    }
+
+    private func takePrefetchedSuggestion() -> MusicSuggestion? {
+        while !prefetchedSuggestions.isEmpty {
+            let prefetchedSuggestion = prefetchedSuggestions.removeFirst().cleanedTitle()
+
+            guard !excludedSongKeys.contains(prefetchedSuggestion.sessionSongKey) else {
+                continue
+            }
+
+            return prefetchedSuggestion
+        }
+
+        return nil
+    }
+
+    private func beginSongAdvance(isAutomatic: Bool) -> Bool {
+        guard isWorkoutActive || !isAutomatic else { return false }
+        guard !isAdvancingSong else { return false }
+
+        if isAutomatic {
+            let now = Date()
+            let secondsSinceLastAdvance = now.timeIntervalSince(lastSongAdvanceAt)
+            if secondsSinceLastAdvance < Self.minimumAutomaticAdvanceInterval {
+                return false
+            }
+
+            let secondsSinceLastAttempt = now.timeIntervalSince(lastAutomaticSongAdvanceAttemptAt)
+            if secondsSinceLastAttempt < Self.minimumAutomaticAdvanceAttemptInterval {
+                return false
+            }
+
+            lastAutomaticSongAdvanceAttemptAt = now
+        }
+
+        isAdvancingSong = true
+        return true
+    }
+
+    private func finishSongAdvance() {
+        isAdvancingSong = false
+    }
+
+    private var excludedSongKeys: Set<String> {
+        playedSongsThisSession.union(unavailableSongsThisSession)
+    }
+
+    private var reservedSongKeys: Set<String> {
+        excludedSongKeys.union(prefetchedSuggestions.map(\.sessionSongKey))
+    }
+
+    private var mustUseLibrarySuggestions: Bool {
+        musicManager.hasLibraryAccess && !musicManager.hasCatalogAccess
+    }
+
+    // MARK: - Fartlek Detection & Lookahead
+
+    /// Analyzes the workout segments to determine if this is a fartlek-style run.
+    /// A fartlek workout has frequent intensity changes with many short segments.
+    private func detectFartlekWorkout(segments: [RunSegment]) -> Bool {
+        guard segments.count >= 4 else { return false }
+
+        // Count segments shorter than 2 minutes
+        let shortSegmentCount = segments.filter { segment in
+            segmentDurationSeconds(segment) < 120
+        }.count
+
+        // Count intensity changes between consecutive segments
+        var intensityChanges = 0
+        for i in 1..<segments.count {
+            if segments[i].intensity != segments[i - 1].intensity {
+                intensityChanges += 1
+            }
+        }
+
+        // It's fartlek-style if at least half the segments are short
+        // AND there are frequent intensity changes (at least once every 2 segments on average)
+        let halfAreShort = shortSegmentCount >= segments.count / 2
+        let frequentChanges = intensityChanges >= (segments.count - 1) / 2
+
+        return halfAreShort && frequentChanges
+    }
+
+    /// Returns the estimated duration of a segment in seconds.
+    /// For distance-based segments, estimates using a rough pace.
+    private func segmentDurationSeconds(_ segment: RunSegment) -> TimeInterval {
+        switch segment.target {
+        case .time(let seconds):
+            return TimeInterval(seconds)
+        case .distance(let meters):
+            // Estimate duration: ~6 min/km easy, ~5 min/km medium, ~4 min/km hard
+            let paceSecondsPerMeter: Double = switch segment.intensity {
+            case .easy: 0.36   // 6:00/km
+            case .medium: 0.30 // 5:00/km
+            case .hard: 0.24   // 4:00/km
+            }
+            return Double(meters) * paceSecondsPerMeter
+        }
+    }
+
+    /// Looks ahead from the current segment and computes the dominant (highest) intensity
+    /// over the next ~3-4 minutes of segments. This prevents choosing a chill song right
+    /// before a hard effort, or during a brief recovery between hard efforts.
+    private func lookaheadIntensity(from segmentIndex: Int, segments: [RunSegment]) -> Intensity {
+        let lookaheadWindowSeconds: TimeInterval = 210 // 3.5 minutes
+
+        var accumulatedTime: TimeInterval = 0
+        var intensityCounts: [Intensity: TimeInterval] = [.easy: 0, .medium: 0, .hard: 0]
+
+        for i in segmentIndex..<segments.count {
+            let seg = segments[i]
+            let segDuration = segmentDurationSeconds(seg)
+            let remaining = lookaheadWindowSeconds - accumulatedTime
+            let contribution = min(segDuration, remaining)
+
+            intensityCounts[seg.intensity, default: 0] += contribution
+            accumulatedTime += contribution
+
+            if accumulatedTime >= lookaheadWindowSeconds { break }
+        }
+
+        // Return the peak (highest) intensity that occupies a meaningful portion of the window.
+        // "Meaningful" = at least 20% of the window, so a single 30s hard burst in 3.5 min
+        // of easy running won't force a hard song.
+        let threshold = lookaheadWindowSeconds * 0.20
+
+        if (intensityCounts[.hard] ?? 0) >= threshold { return .hard }
+        if (intensityCounts[.medium] ?? 0) >= threshold { return .medium }
+        return .easy
+    }
+
+    /// Returns the effective intensity to use for music selection at the given segment index.
+    /// For fartlek workouts, this uses the lookahead window. For normal workouts, it uses
+    /// the current segment's intensity directly.
+    private func effectiveIntensity(at segmentIndex: Int, segments: [RunSegment]) -> Intensity {
+        if isFartlekWorkout {
+            return lookaheadIntensity(from: segmentIndex, segments: segments)
+        }
+        let idx = min(segmentIndex, segments.count - 1)
+        return segments[idx].intensity
+    }
+
     // MARK: - Watch Communication
     
     private func sendWorkoutStartToWatch(segments: [RunSegment]) {
         // Use fallback method for workout start - critical message
         guard watchConnectivity.isWatchPaired && watchConnectivity.isWatchAppInstalled else { 
-            print("Watch not paired or app not installed - will work in standalone mode")
             return 
         }
         
@@ -465,15 +831,21 @@ final class WorkoutMusicCoordinator: ObservableObject {
     
     private func sendWorkoutContextToWatch(_ context: WorkoutContext) {
         guard watchConnectivity.isWatchPaired && watchConnectivity.isWatchAppInstalled else { return }
-        
-        let message: [String: Any] = [
+
+        var message: [String: Any] = [
             "type": WatchMessageType.workoutUpdate.rawValue,
             "currentSegmentIndex": context.currentSegmentIndex,
             "totalDistance": context.totalDistance,
-            "totalTime": context.totalTime,
-            "heartRate": context.musicContext.currentHeartRate as Any,
-            "targetHeartRate": context.musicContext.targetHeartRate as Any
+            "totalTime": context.totalTime
         ]
+
+        if let heartRate = context.musicContext.currentHeartRate {
+            message["heartRate"] = heartRate
+        }
+
+        if let targetHeartRate = context.musicContext.targetHeartRate {
+            message["targetHeartRate"] = targetHeartRate
+        }
         
         watchConnectivity.sendMessageWithFallback(message) { error in
             print("Failed to send workout context to watch: \(error)")
@@ -482,14 +854,24 @@ final class WorkoutMusicCoordinator: ObservableObject {
     
     private func sendCurrentSongToWatch(_ song: MusicSong?) {
         guard watchConnectivity.isWatchPaired && watchConnectivity.isWatchAppInstalled else { return }
-        
-        do {
-            let songData = song != nil ? try JSONEncoder().encode(song!) : nil
+
+        guard let song = song else {
             let message: [String: Any] = [
                 "type": WatchMessageType.currentSong.rawValue,
-                "song": songData as Any
+                "hasSong": false
             ]
-            
+            watchConnectivity.sendMessageWithFallback(message) { _ in }
+            return
+        }
+
+        do {
+            let songData = try JSONEncoder().encode(song)
+            let message: [String: Any] = [
+                "type": WatchMessageType.currentSong.rawValue,
+                "hasSong": true,
+                "song": songData
+            ]
+
             watchConnectivity.sendMessageWithFallback(message) { error in
                 print("Failed to send current song to watch: \(error)")
             }
@@ -498,12 +880,13 @@ final class WorkoutMusicCoordinator: ObservableObject {
         }
     }
     
-    private func sendPlaybackStateToWatch(_ isPlaying: Bool) {
+    private func sendPlaybackStateToWatch(_ isPlaying: Bool, state: String) {
         guard watchConnectivity.isWatchPaired && watchConnectivity.isWatchAppInstalled else { return }
         
         let message: [String: Any] = [
             "type": WatchMessageType.playbackControl.rawValue,
-            "isPlaying": isPlaying
+            "isPlaying": isPlaying,
+            "state": state
         ]
         
         watchConnectivity.sendMessageWithFallback(message) { error in
@@ -536,17 +919,11 @@ final class WorkoutMusicCoordinator: ObservableObject {
         switch action {
         case "play":
             musicManager.play()
-        case "pause":
-            musicManager.pause()
         case "stop":
             musicManager.stop()
-        case "next":
-            musicManager.skipToNext()
-        case "previous":
-            musicManager.skipToPrevious()
         case "suggest":
             Task {
-                await generateNextSong()
+                await generateNextSongUserRequested()
             }
         default:
             break
@@ -556,18 +933,92 @@ final class WorkoutMusicCoordinator: ObservableObject {
     private func handleWorkoutControl(_ action: String) {
         switch action {
         case "end":
-            print("🏃 Ending workout from watch")
             stopWorkoutMusic()
         case "pause":
-            print("🏃 Pausing workout from watch")
-            // Could implement workout pause here if needed
+            break
         default:
             break
         }
     }
+
+    /// Handles workout control messages keyed by "type" (sent by the Watch).
+    /// The Watch sends messages like {"type": "workoutStarted"} and {"type": "workoutCompleted"}.
+    private func handleWorkoutControlByType(_ type: String, message: [String: Any]) {
+        switch type {
+        case WatchMessageType.workoutStarted.rawValue, WatchMessageType.workoutStart.rawValue:
+            if let segments = pendingRunPlanSegments {
+                pendingRunPlanSegments = nil
+                startWorkoutMusic(segments: segments)
+            } else if let segments = decodeSegmentsFromWatchMessage(message) {
+                startWorkoutMusic(segments: segments)
+            } else {
+                // Watch started a workout without iPhone sending a plan first.
+                // Start music with a default single easy segment so the user still gets music.
+                let defaultSegments = [RunSegment(intensity: .easy, target: .time(seconds: 1800))]
+                startWorkoutMusic(segments: defaultSegments)
+            }
+
+        case WatchMessageType.workoutCompleted.rawValue:
+            pendingRunPlanSegments = nil
+
+            // Update context with final data from the Watch (distance, time)
+            // before saving, since periodic updates may have been slightly behind.
+            if let context = currentWorkoutContext {
+                let finalDistanceKm = message["totalDistanceKm"] as? Double ?? context.totalDistance
+                let finalTimeSeconds = message["totalTimeSeconds"] as? Int ?? Int(context.totalTime)
+
+                let finalContext = makeWorkoutContext(
+                    segments: context.segments,
+                    currentSegmentIndex: context.currentSegmentIndex,
+                    totalDistance: finalDistanceKm,
+                    totalTime: TimeInterval(finalTimeSeconds),
+                    heartRate: context.musicContext.currentHeartRate,
+                    targetHeartRate: context.musicContext.targetHeartRate
+                )
+                currentWorkoutContext = finalContext
+            }
+
+            saveRunEvent()
+            stopWorkoutMusic()
+
+        default:
+            break
+        }
+    }
+
+    private func decodeSegmentsFromWatchMessage(_ message: [String: Any]) -> [RunSegment]? {
+        guard let rawSegments = message["segments"] as? [[String: Any]], !rawSegments.isEmpty else {
+            return nil
+        }
+
+        let segments = rawSegments.compactMap { rawSegment -> RunSegment? in
+            guard let intensityRaw = rawSegment["intensity"] as? String,
+                  let intensity = Intensity(rawValue: intensityRaw),
+                  let targetDictionary = rawSegment["target"] as? [String: Any],
+                  let targetType = targetDictionary["type"] as? String,
+                  let targetValue = targetDictionary["value"] as? Int else {
+                return nil
+            }
+
+            let target: Target
+            switch targetType {
+            case "time":
+                target = .time(seconds: targetValue)
+            case "distance":
+                target = .distance(meters: targetValue)
+            default:
+                return nil
+            }
+
+            return RunSegment(intensity: intensity, target: target)
+        }
+
+        return segments.isEmpty ? nil : segments
+    }
     
     private func handleHeartRateUpdate(_ heartRate: Int) {
         guard let context = currentWorkoutContext else { return }
+        rememberHeartRate(heartRate)
         
         updateWorkoutContext(
             currentSegmentIndex: context.currentSegmentIndex,
@@ -578,16 +1029,54 @@ final class WorkoutMusicCoordinator: ObservableObject {
         )
     }
     
+    private func handleWorkoutUpdate(_ message: [String: Any]) {
+        guard isWorkoutActive, let context = currentWorkoutContext else { return }
+
+        let segmentIndex = message["currentSegmentIndex"] as? Int ?? context.currentSegmentIndex
+        let totalDistance = message["totalDistance"] as? Double ?? context.totalDistance
+        let totalTime = message["totalTime"] as? Double ?? context.totalTime
+        let heartRateUnavailable = message["heartRateUnavailable"] as? Bool ?? false
+        let receivedHeartRate = message["heartRate"] as? Int
+        let heartRate = heartRateUnavailable ? nil : (receivedHeartRate ?? context.musicContext.currentHeartRate)
+        let targetHeartRate = message["targetHeartRate"] as? Int ?? context.musicContext.targetHeartRate
+
+        if heartRateUnavailable,
+           !isLiveMetricsWarningDismissed,
+           let warning = message["metricsWarning"] as? String {
+            liveMetricsWarning = warning
+        }
+
+        if let heartRate {
+            rememberHeartRate(heartRate)
+        }
+
+        let segmentChanged = segmentIndex != context.currentSegmentIndex
+
+        let updatedContext = makeWorkoutContext(
+            segments: context.segments,
+            currentSegmentIndex: segmentIndex,
+            totalDistance: totalDistance,
+            totalTime: totalTime,
+            heartRate: heartRate,
+            targetHeartRate: targetHeartRate
+        )
+
+        currentWorkoutContext = updatedContext
+        musicManager.updateWorkoutContext(updatedContext)
+
+        if segmentChanged {
+            handleSegmentChange(segmentIndex: segmentIndex)
+        }
+    }
+
     private func handleSegmentChange(segmentIndex: Int) {
-        print("🏃 Handling segment change to index: \(segmentIndex)")
-        
+
         guard let context = currentWorkoutContext else {
-            print("⚠️ No workout context available for segment change")
             return
         }
-        
+
         // Update the workout context with the new segment index
-        let updatedContext = WorkoutContext(
+        let updatedContext = makeWorkoutContext(
             segments: context.segments,
             currentSegmentIndex: segmentIndex,
             totalDistance: context.totalDistance,
@@ -595,46 +1084,237 @@ final class WorkoutMusicCoordinator: ObservableObject {
             heartRate: context.musicContext.currentHeartRate,
             targetHeartRate: context.musicContext.targetHeartRate
         )
-        
+
         currentWorkoutContext = updatedContext
         musicManager.updateWorkoutContext(updatedContext)
-        
-        // Generate motivational message for new segment
-        print("🎤 Generating motivation for new segment")
-        Task {
-            await generateAndPlayWorkoutMotivation(
-                segmentChange: true,
-                distanceMilestone: false
-            )
+
+        // For fartlek workouts, skip song changes on short segments.
+        // The current song continues and we rely on the lookahead intensity
+        // to keep the overall energy appropriate.
+        if isFartlekWorkout {
+            let newSegment = context.segments[min(segmentIndex, context.segments.count - 1)]
+            let newSegmentDuration = segmentDurationSeconds(newSegment)
+
+            if newSegmentDuration < Self.minimumSegmentDurationForSongChange {
+                // Short segment — don't change the song. The existing song's energy
+                // was chosen using the lookahead window and already accounts for this segment.
+                return
+            }
         }
-        
+
         // Generate a new song suggestion for the new segment
-        print("🎵 Generating new song for segment \(segmentIndex + 1)/\(context.segments.count)")
         Task {
             await generateNextSong()
         }
     }
-}
 
-// MARK: - Extensions
-extension Target {
-    var isTime: Bool {
-        if case .time = self { return true }
-        return false
+    // MARK: - Time-Series Recording
+
+    private func startRecordingTimer() {
+        stopRecordingTimer()
+        recordingTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.recordDataPoint()
+            }
+        }
     }
-    
-    var isDistance: Bool {
-        if case .distance = self { return true }
-        return false
+
+    private func stopRecordingTimer() {
+        recordingTimer?.invalidate()
+        recordingTimer = nil
     }
-    
-    var timeSeconds: Int {
-        if case .time(let seconds) = self { return seconds }
-        return 0
+
+    private func startLiveMetricsMonitorTimer() {
+        stopLiveMetricsMonitorTimer()
+        liveMetricsMonitorTimer = Timer.scheduledTimer(withTimeInterval: 15.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.checkLiveMetricsSignal()
+            }
+        }
     }
-    
-    var distanceMeters: Int {
-        if case .distance(let meters) = self { return meters }
-        return 0
+
+    private func stopLiveMetricsMonitorTimer() {
+        liveMetricsMonitorTimer?.invalidate()
+        liveMetricsMonitorTimer = nil
+    }
+
+    private func checkLiveMetricsSignal() {
+        guard isWorkoutActive, let workoutStartTime else { return }
+        guard !isLiveMetricsWarningDismissed else { return }
+        guard Date().timeIntervalSince(workoutStartTime) >= Self.liveHeartRateGracePeriod else { return }
+        guard lastHeartRateSampleAt == nil else { return }
+
+        liveMetricsWarning = "Heart rate has not arrived from Apple Watch yet. Music is using the run plan, segment intensity, distance, pace, and song history until heart-rate data starts."
+    }
+
+    func dismissLiveMetricsWarning() {
+        isLiveMetricsWarningDismissed = true
+        liveMetricsWarning = nil
+    }
+
+    private func recordDataPoint() {
+        guard let startTime = workoutStartTime,
+              let context = currentWorkoutContext else { return }
+
+        let elapsed = Date().timeIntervalSince(startTime)
+        let distanceMeters = context.totalDistance * 1000.0 // totalDistance is in km
+        let heartRate = context.musicContext.currentHeartRate
+
+        // Calculate pace (seconds per km)
+        let paceSecondsPerKm: Double? = if distanceMeters > 50, elapsed > 0 {
+            elapsed / (distanceMeters / 1000.0)
+        } else {
+            nil
+        }
+
+        let currentSong = musicManager.currentSong
+
+        let dataPoint = WorkoutDataPoint(
+            timestamp: elapsed,
+            heartRate: heartRate,
+            cadence: nil, // Cadence is tracked on Watch side
+            distanceMeters: distanceMeters,
+            paceSecondsPerKm: paceSecondsPerKm,
+            currentSongTitle: currentSong?.title,
+            currentSongArtist: currentSong?.artist
+        )
+
+        workoutDataPoints.append(dataPoint)
+    }
+
+    private func trackSongChange(_ song: MusicSong?) {
+        guard isWorkoutActive, let startTime = workoutStartTime else { return }
+
+        let songID = song?.id
+        guard songID != lastRecordedSongID else { return }
+
+        let elapsed = Date().timeIntervalSince(startTime)
+
+        // Close previous song period
+        if !songHistory.isEmpty {
+            let last = songHistory.removeLast()
+            songHistory.append(SongPeriod(
+                songTitle: last.songTitle,
+                artist: last.artist,
+                startTimestamp: last.startTimestamp,
+                endTimestamp: elapsed
+            ))
+        }
+
+        // Start new song period
+        if let song = song {
+            playedSongsThisSession.insert(song.sessionSongKey)
+            rememberPlayedSong(song)
+            lastSongAdvanceAt = Date()
+            songHistory.append(SongPeriod(
+                songTitle: song.title,
+                artist: song.artist,
+                startTimestamp: elapsed,
+                endTimestamp: nil
+            ))
+        }
+
+        lastRecordedSongID = songID
+    }
+
+    private func rememberHeartRate(_ heartRate: Int) {
+        lastHeartRateSampleAt = Date()
+        liveMetricsWarning = nil
+        isLiveMetricsWarningDismissed = false
+        recentHeartRateSamples.append(heartRate)
+        recentHeartRateSamples = Array(recentHeartRateSamples.suffix(Self.maximumHeartRateSamples))
+    }
+
+    private func rememberPlayedSong(_ song: MusicSong) {
+        recentPlayedSongs.removeAll { $0.sessionSongKey == song.sessionSongKey }
+        recentPlayedSongs.append(song)
+        recentPlayedSongs = Array(recentPlayedSongs.suffix(Self.maximumRecentSongs))
+    }
+
+    private func makeWorkoutContext(
+        segments: [RunSegment],
+        currentSegmentIndex: Int,
+        totalDistance: Double,
+        totalTime: TimeInterval,
+        heartRate: Int?,
+        targetHeartRate: Int?
+    ) -> WorkoutContext {
+        let smoothedHeartRate = MusicRecommendationPolicy.smoothedHeartRate(from: recentHeartRateSamples)
+        let heartRateTrend = MusicRecommendationPolicy.heartRateTrend(from: recentHeartRateSamples)
+        let hasStableHeartRateSignal =
+            recentHeartRateSamples.count >= 4 ||
+            MusicRecommendationPolicy.hasStableHeartRateMismatch(
+                targetHeartRate: targetHeartRate,
+                samples: recentHeartRateSamples
+            )
+        let currentSongEndingIn: TimeInterval? = if musicManager.currentSongDuration > 0 {
+            max(0, musicManager.currentSongDuration - musicManager.currentPlaybackTime)
+        } else {
+            nil
+        }
+
+        return WorkoutContext(
+            segments: segments,
+            currentSegmentIndex: currentSegmentIndex,
+            totalDistance: totalDistance,
+            totalTime: totalTime,
+            heartRate: heartRate,
+            smoothedHeartRate: smoothedHeartRate,
+            heartRateTrend: heartRateTrend,
+            hasStableHeartRateSignal: hasStableHeartRateSignal,
+            targetHeartRate: targetHeartRate,
+            currentSongEndingIn: currentSongEndingIn,
+            recentSongs: recentPlayedSongs
+        )
+    }
+
+    private func closeFinalSongPeriod() {
+        guard let startTime = workoutStartTime, !songHistory.isEmpty else { return }
+
+        let elapsed = Date().timeIntervalSince(startTime)
+        let last = songHistory.removeLast()
+        if last.endTimestamp == nil {
+            songHistory.append(SongPeriod(
+                songTitle: last.songTitle,
+                artist: last.artist,
+                startTimestamp: last.startTimestamp,
+                endTimestamp: elapsed
+            ))
+        } else {
+            songHistory.append(last)
+        }
+    }
+
+    // MARK: - Run Event Saving
+
+    private func saveRunEvent() {
+        guard let context = currentWorkoutContext else {
+            print("⚠️ saveRunEvent: No workout context available")
+            return
+        }
+
+        let totalDistanceMeters = Int(context.totalDistance * 1000.0)
+        let totalTimeSeconds = Int(context.totalTime)
+
+        // Log for debugging
+        print("📊 saveRunEvent: distance=\(totalDistanceMeters)m, time=\(totalTimeSeconds)s, dataPoints=\(workoutDataPoints.count)")
+
+        // Save even if distance/time seem small — the Watch data is authoritative.
+        // Only skip if there's truly no data at all (e.g. immediate cancel).
+        guard totalTimeSeconds > 0 || totalDistanceMeters > 0 else {
+            print("⚠️ saveRunEvent: Skipping — no distance or time data")
+            return
+        }
+
+        let event = RunEvent(
+            totalDistanceMeters: totalDistanceMeters,
+            totalTimeSeconds: totalTimeSeconds,
+            segments: context.segments,
+            dataPoints: workoutDataPoints,
+            songHistory: songHistory
+        )
+
+        RunHistoryStore.shared.add(event: event)
+        print("✅ saveRunEvent: Run event saved successfully")
     }
 }

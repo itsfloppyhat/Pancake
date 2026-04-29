@@ -2,8 +2,8 @@ import Foundation
 import HealthKit
 import CoreLocation
 import CoreMotion
-import Observation
 import WatchConnectivity
+import WatchKit
 
 // MARK: - GPS Status
 enum GPSStatus: String, CaseIterable {
@@ -114,14 +114,28 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
     
     // Timer for total time tracking
     private var workoutTimer: Timer?
+
+    // Timer for sending updates to iPhone
+    private var iPhoneUpdateTimer: Timer?
+
+    // Km milestone notification
+    @Published var showKmMilestone: Bool = false
+    @Published var lastKmMilestone: Int = 0
+    private var lastNotifiedKm: Int = 0
+    private var kmDismissTimer: Timer?
     
     // MARK: - Live Metrics
     @Published private(set) var heartRate: Double?
+    @Published private(set) var liveMetricsWarning: String?
     @Published private(set) var activeCalories: Double = 0
     @Published private(set) var distanceMeters: Double = 0
     @Published private(set) var workoutStartDate: Date?
+    @Published private(set) var isStarting: Bool = false
     @Published private(set) var isRunning: Bool = false
     @Published var error: Error?
+    private var lastHeartRateSampleAt: Date?
+    private var hasSentHeartRateWarningToPhone = false
+    private static let heartRateSignalGracePeriod: TimeInterval = 90
     
     // MARK: - Workout State
     @Published private(set) var currentSegmentIndex: Int = 0
@@ -186,76 +200,122 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
     func startOutdoorRun(segments: [RunSegment]) {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
-            
-            guard !self.isRunning else {
+
+            guard !self.isRunning, !self.isStarting else {
                 self.error = WorkoutError.alreadyRunning
                 return
             }
-            
+
             guard !segments.isEmpty else {
                 self.error = WorkoutError.noSegments
                 return
             }
-            
+
             // Store planned segments
             self.plannedSegments = segments
             self.currentSegmentIndex = 0
-            
+
             // Initialize segment tracking
             self.segmentStartTime = Date()
             self.segmentStartDistance = 0
-            
+
             // Clear any previous errors
             self.error = nil
-            
+            self.isStarting = true
+            self.heartRate = nil
+            self.currentHeartRate = nil
+            self.liveMetricsWarning = nil
+            self.lastHeartRateSampleAt = nil
+            self.hasSentHeartRateWarningToPhone = false
+
             // Request location permissions if not granted
             if self.locationManager.authorizationStatus == .notDetermined {
                 self.locationManager.requestWhenInUseAuthorization()
             }
-            
-            // Prepare HealthKit session
-            let config = HKWorkoutConfiguration()
-            config.activityType = .running
-            config.locationType = .outdoor
-            
-            do {
-                print("🏃 Creating HealthKit workout session...")
-                self.session = try HKWorkoutSession(healthStore: self.healthStore, configuration: config)
-                self.builder = self.session?.associatedWorkoutBuilder()
-                self.builder?.dataSource = HKLiveWorkoutDataSource(healthStore: self.healthStore, workoutConfiguration: config)
-                self.session?.delegate = self
-                self.builder?.delegate = self
-                
-                print("🏃 Starting workout session...")
-                self.workoutStartDate = Date()
-                self.isRunning = true
-                self.startWorkoutTimer()
-                
-                self.session?.startActivity(with: self.workoutStartDate!)
-                self.builder?.beginCollection(withStart: self.workoutStartDate!) { [weak self] (_, err) in
-                    DispatchQueue.main.async {
-                        if let err = err {
-                            print("❌ Failed to begin data collection: \(err)")
-                            self?.error = err
-                            self?.isRunning = false
-                        } else {
-                            print("✅ Data collection started successfully")
-                        }
-                    }
-                }
-                
-                self.locationManager.startUpdatingLocation()
-                self.startMotionTracking()
-                
-                // Start AI music curation
-                self.startAIMusicCuration()
-                
-            } catch {
-                print("❌ Failed to create HealthKit workout session: \(error)")
-                self.error = error
-                self.isRunning = false
+
+            // Give SwiftUI a frame to render the starting screen before HealthKit setup begins.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+                self?.beginOutdoorRunSession()
             }
         }
+    }
+
+    private func beginOutdoorRunSession() {
+        guard isStarting else { return }
+
+        // Prepare HealthKit session
+        let config = HKWorkoutConfiguration()
+        config.activityType = .running
+        config.locationType = .outdoor
+
+        do {
+            session = try HKWorkoutSession(healthStore: healthStore, configuration: config)
+            builder = session?.associatedWorkoutBuilder()
+            builder?.dataSource = HKLiveWorkoutDataSource(healthStore: healthStore, workoutConfiguration: config)
+            session?.delegate = self
+            builder?.delegate = self
+
+            let startDate = Date()
+            workoutStartDate = startDate
+            segmentStartTime = startDate
+
+            session?.startActivity(with: startDate)
+            builder?.beginCollection(withStart: startDate) { [weak self] (_, err) in
+                DispatchQueue.main.async {
+                    guard let self else { return }
+
+                    if let err = err {
+                        print("❌ Failed to begin data collection: \(err)")
+                        self.failWorkoutStart(err)
+                        return
+                    }
+
+                    self.confirmWorkoutStarted()
+                }
+            }
+        } catch {
+            print("❌ Failed to create HealthKit workout session: \(error)")
+            failWorkoutStart(error)
+        }
+    }
+
+    private func confirmWorkoutStarted() {
+        guard isStarting else { return }
+
+        isStarting = false
+        isRunning = true
+
+        startWorkoutTimer()
+        locationManager.startUpdatingLocation()
+        startMotionTracking()
+
+        // Start AI music curation only after the Watch workout is actually running.
+        startAIMusicCuration()
+
+        // Start periodic updates to iPhone (HR, distance, time)
+        startIPhoneUpdateTimer()
+    }
+
+    private func failWorkoutStart(_ error: Error) {
+        self.error = error
+        isStarting = false
+        isRunning = false
+
+        session?.end()
+        session = nil
+        builder = nil
+
+        locationManager.stopUpdatingLocation()
+        stopMotionTracking()
+        stopWorkoutTimer()
+        stopIPhoneUpdateTimer()
+
+        workoutStartDate = nil
+        segmentStartTime = nil
+        segmentStartDistance = 0
+        liveMetricsWarning = nil
+        lastHeartRateSampleAt = nil
+        hasSentHeartRateWarningToPhone = false
     }
     
     private func startMotionTracking() {
@@ -313,9 +373,15 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
             DispatchQueue.main.async {
                 guard let self = self, let startDate = self.workoutStartDate else { return }
                 self.totalTime = Date().timeIntervalSince(startDate)
-                
+
                 // Check for segment completion
                 self.checkForSegmentCompletion()
+
+                // Check for km milestones
+                self.checkForKmMilestone()
+
+                // Warn if HealthKit never starts delivering heart-rate samples.
+                self.checkForHeartRateSignal()
             }
         }
     }
@@ -330,9 +396,10 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
         if currentSegmentProgress >= 1.0 {
             // Check if there are more segments
             if currentSegmentIndex + 1 < plannedSegments.count {
+                WKInterfaceDevice.current().play(.success)
+
                 // Move to next segment
                 currentSegmentIndex += 1
-                print("🏃 Advanced to segment \(currentSegmentIndex + 1)/\(plannedSegments.count): \(currentSegment?.intensity.label ?? "Unknown")")
                 
                 // Reset segment tracking for new segment
                 segmentStartTime = Date()
@@ -342,77 +409,59 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
                 updateMusicContextForSegmentChange()
             } else {
                 // All segments complete - workout finished
-                print("🏃 All segments completed - workout finished")
                 // Could trigger workout completion here if needed
             }
         }
     }
     
-    private func updateMusicContextForSegmentChange() {
-        // Send updated music context to iPhone for new segment
-        guard WCSession.default.isReachable else { return }
-        
-        let targetDescription: String
-        if let segment = currentSegment {
-            switch segment.target {
-            case .time(let seconds):
-                targetDescription = "\(seconds) seconds"
-            case .distance(let meters):
-                targetDescription = "\(meters) meters"
+    private func checkForKmMilestone() {
+        let currentKm = Int(displayedDistanceKm)
+        guard currentKm > lastNotifiedKm && currentKm > 0 else { return }
+
+        lastNotifiedKm = currentKm
+        lastKmMilestone = currentKm
+        showKmMilestone = true
+
+        // Haptic feedback
+        WKInterfaceDevice.current().play(.notification)
+
+        // Auto-dismiss after 4 seconds
+        kmDismissTimer?.invalidate()
+        kmDismissTimer = Timer.scheduledTimer(withTimeInterval: 4.0, repeats: false) { [weak self] _ in
+            DispatchQueue.main.async {
+                self?.showKmMilestone = false
             }
-        } else {
-            targetDescription = "unknown"
         }
-        
-        let message: [String: Any] = [
-            "type": "segment_changed",
-            "currentSegmentIndex": currentSegmentIndex,
-            "segmentIntensity": currentSegment?.intensity.rawValue ?? "unknown",
-            "segmentTarget": targetDescription
-        ]
-        
-        WCSession.default.sendMessage(message, replyHandler: nil) { error in
-            print("Failed to send segment change to iPhone: \(error)")
-        }
+    }
+
+    private func checkForHeartRateSignal() {
+        guard isRunning,
+              lastHeartRateSampleAt == nil,
+              workoutDuration >= Self.heartRateSignalGracePeriod else { return }
+
+        liveMetricsWarning = "No heart-rate signal yet. Music is using your run plan and segment intensity until Apple Watch heart-rate data starts."
+
+        guard !hasSentHeartRateWarningToPhone else { return }
+        hasSentHeartRateWarningToPhone = true
+        sendWorkoutSnapshotToiPhone(reason: "heart-rate signal warning")
+    }
+
+    private func updateMusicContextForSegmentChange() {
+        sendWorkoutSnapshotToiPhone(reason: "segment change")
     }
     
     // MARK: - Music Curation
-    
+
     private func startAIMusicCuration() {
-        if isStandaloneMode() {
-            startStandaloneMusic()
-        } else {
-            startConnectedMusic()
-        }
-    }
-    
-    private func isStandaloneMode() -> Bool {
-        // Check if iPhone is nearby and connected
-        return !WCSession.default.isReachable
-    }
-    
-    private func startStandaloneMusic() {
-        // Use standalone music manager for cellular Watch
-        Task { @MainActor in
-            let standaloneManager = StandaloneMusicManager.shared
-            
-            if let currentSegment = currentSegment {
-                standaloneManager.selectWorkoutPlaylist(for: currentSegment.intensity)
-            }
-        }
-    }
-    
-    private func startConnectedMusic() {
         // Send workout context to iPhone for AI music curation
         sendWorkoutContextToiPhone()
     }
     
     private func sendWorkoutContextToiPhone() {
-        guard WCSession.default.isReachable,
-              currentSegment != nil else { return }
+        guard currentSegment != nil else { return }
         
         let message: [String: Any] = [
-            "type": "workout_start",
+            "type": WatchMessageType.workoutStart.rawValue,
             "segments": plannedSegments.map { segment in
                 [
                     "intensity": segment.intensity.rawValue,
@@ -423,61 +472,112 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
                 ]
             }
         ]
-        
-        WCSession.default.sendMessage(message, replyHandler: nil) { error in
-            print("Failed to send workout context to iPhone: \(error)")
-        }
+
+        sendToiPhone(
+            message,
+            preferLatestStateFallback: false,
+            guaranteeDeliveryWhenUnreachable: true,
+            errorLabel: "initial workout context"
+        )
     }
     
     private func updateMusicContext() {
-        if isStandaloneMode() {
-            updateStandaloneMusic()
-        } else {
-            updateConnectedMusic()
-        }
+        sendWorkoutSnapshotToiPhone(reason: "live workout update")
     }
-    
-    private func updateStandaloneMusic() {
-        Task { @MainActor in
-            let standaloneManager = StandaloneMusicManager.shared
-            
-            if let currentSegment = currentSegment {
-                standaloneManager.selectSmartMusicForWorkout(
-                    intensity: currentSegment.intensity,
-                    heartRate: currentHeartRate,
-                    timeRemaining: currentSegmentProgress * currentSegment.targetDuration
-                )
+
+    // MARK: - Periodic iPhone Updates
+
+    private func startIPhoneUpdateTimer() {
+        stopIPhoneUpdateTimer()
+        iPhoneUpdateTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+            DispatchQueue.main.async {
+                self?.sendPeriodicUpdateToiPhone()
             }
         }
     }
-    
-    private func updateConnectedMusic() {
-        // Send updated context to iPhone
-        guard WCSession.default.isReachable,
-              currentSegment != nil else { return }
-        
-        let message: [String: Any] = [
-            "type": "workout_update",
+
+    private func stopIPhoneUpdateTimer() {
+        iPhoneUpdateTimer?.invalidate()
+        iPhoneUpdateTimer = nil
+    }
+
+    private func sendPeriodicUpdateToiPhone() {
+        guard isRunning else { return }
+        sendWorkoutSnapshotToiPhone(reason: "periodic workout update")
+    }
+
+    private func sendWorkoutSnapshotToiPhone(reason: String) {
+        guard currentSegment != nil else { return }
+
+        var updateMessage: [String: Any] = [
+            "type": WatchMessageType.workoutUpdate.rawValue,
             "currentSegmentIndex": currentSegmentIndex,
             "totalDistance": totalDistance,
-            "totalTime": totalTime,
-            "heartRate": currentHeartRate as Any,
-            "targetHeartRate": targetHeartRate as Any
+            "totalTime": totalTime
         ]
-        
-        WCSession.default.sendMessage(message, replyHandler: nil) { error in
-            print("Failed to send workout update to iPhone: \(error)")
+
+        if let currentHeartRate {
+            updateMessage["heartRate"] = currentHeartRate
+        }
+
+        if let liveMetricsWarning {
+            updateMessage["heartRateUnavailable"] = true
+            updateMessage["metricsWarning"] = liveMetricsWarning
+        }
+
+        if let targetHeartRate {
+            updateMessage["targetHeartRate"] = targetHeartRate
+        }
+
+        sendToiPhone(
+            updateMessage,
+            preferLatestStateFallback: true,
+            guaranteeDeliveryWhenUnreachable: false,
+            errorLabel: reason
+        )
+    }
+
+    private func sendToiPhone(
+        _ message: [String: Any],
+        preferLatestStateFallback: Bool,
+        guaranteeDeliveryWhenUnreachable: Bool,
+        errorLabel: String
+    ) {
+        guard WCSession.isSupported() else { return }
+
+        let session = WCSession.default
+
+        if session.isReachable {
+            session.sendMessage(message, replyHandler: nil) { error in
+                print("Failed to send \(errorLabel) to iPhone: \(error)")
+            }
+            return
+        }
+
+        if preferLatestStateFallback {
+            do {
+                try session.updateApplicationContext(message)
+                return
+            } catch {
+                print("Failed to update application context for \(errorLabel): \(error)")
+            }
+        }
+
+        if guaranteeDeliveryWhenUnreachable {
+            session.transferUserInfo(message)
         }
     }
 
     func stopWorkout() {
         DispatchQueue.main.async { [weak self] in
             guard let self = self, self.isRunning else { return }
-            
+
+            self.isStarting = false
             self.session?.end()
             self.locationManager.stopUpdatingLocation()
             self.stopMotionTracking()
             self.stopWorkoutTimer()
+            self.stopIPhoneUpdateTimer()
             self.isRunning = false
             
             // Reset state
@@ -486,6 +586,16 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
             self.workoutStartDate = nil
             self.segmentStartTime = nil
             self.segmentStartDistance = 0
+            self.lastNotifiedKm = 0
+            self.showKmMilestone = false
+            self.lastKmMilestone = 0
+            self.heartRate = nil
+            self.currentHeartRate = nil
+            self.liveMetricsWarning = nil
+            self.lastHeartRateSampleAt = nil
+            self.hasSentHeartRateWarningToPhone = false
+            self.kmDismissTimer?.invalidate()
+            self.kmDismissTimer = nil
         }
     }
     
@@ -636,25 +746,16 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
 extension WorkoutSessionManager: HKWorkoutSessionDelegate, HKLiveWorkoutBuilderDelegate {
     func workoutSession(_ workoutSession: HKWorkoutSession, didChangeTo toState: HKWorkoutSessionState, from fromState: HKWorkoutSessionState, date: Date) {
         DispatchQueue.main.async { [weak self] in
-            print("🏃 Workout session state changed from \(fromState.rawValue) to \(toState.rawValue) at \(date)")
-            
             switch toState {
-            case .notStarted:
-                print("🏃 Workout session not started")
-            case .prepared:
-                print("🏃 Workout session prepared")
             case .running:
-                print("🏃 Workout session running")
-                self?.isRunning = true
-            case .paused:
-                print("🏃 Workout session paused")
-            case .stopped:
-                print("🏃 Workout session stopped")
+                if self?.isStarting == false {
+                    self?.isRunning = true
+                }
             case .ended:
-                print("🏃 Workout session ended")
+                self?.isStarting = false
                 self?.isRunning = false
-            @unknown default:
-                print("🏃 Workout session unknown state: \(toState.rawValue)")
+            default:
+                break
             }
         }
     }
@@ -662,8 +763,7 @@ extension WorkoutSessionManager: HKWorkoutSessionDelegate, HKLiveWorkoutBuilderD
     func workoutSession(_ workoutSession: HKWorkoutSession, didFailWithError error: Error) {
         DispatchQueue.main.async { [weak self] in
             print("❌ Workout session failed with error: \(error)")
-            self?.error = error
-            self?.isRunning = false
+            self?.failWorkoutStart(error)
         }
     }
     
@@ -697,6 +797,8 @@ extension WorkoutSessionManager: HKWorkoutSessionDelegate, HKLiveWorkoutBuilderD
         DispatchQueue.main.async { [weak self] in
             self?.heartRate = heartRate
             self?.currentHeartRate = Int(heartRate)
+            self?.lastHeartRateSampleAt = Date()
+            self?.liveMetricsWarning = nil
         }
     }
     
@@ -711,6 +813,18 @@ extension WorkoutSessionManager: HKWorkoutSessionDelegate, HKLiveWorkoutBuilderD
         }
     }
     
+    /// Best-effort distance in km, preferring HealthKit then falling back to CoreLocation.
+    var displayedDistanceKm: Double {
+        let hkKm = distanceMeters / 1000.0
+        if hkKm > 0 { return hkKm }
+        guard locations.count > 1 else { return 0 }
+        var total: CLLocationDistance = 0
+        for i in 1..<locations.count {
+            total += locations[i].distance(from: locations[i - 1])
+        }
+        return total / 1000.0
+    }
+
     private func updateDistance(from builder: HKLiveWorkoutBuilder) {
         guard let distanceType = HKObjectType.quantityType(forIdentifier: .distanceWalkingRunning),
               let stats = builder.statistics(for: distanceType),
@@ -723,39 +837,3 @@ extension WorkoutSessionManager: HKWorkoutSessionDelegate, HKLiveWorkoutBuilderD
         }
     }
 }
-
-// MARK: - Target Extensions
-extension Target {
-    var isTime: Bool {
-        if case .time = self { return true }
-        return false
-    }
-    
-    var isDistance: Bool {
-        if case .distance = self { return true }
-        return false
-    }
-    
-    var timeSeconds: Int {
-        if case .time(let seconds) = self { return seconds }
-        return 0
-    }
-    
-    var distanceMeters: Int {
-        if case .distance(let meters) = self { return meters }
-        return 0
-    }
-}
-
-// MARK: - RunSegment Extensions
-extension RunSegment {
-    var targetDuration: TimeInterval {
-        switch target {
-        case .time(let seconds):
-            return TimeInterval(seconds)
-        case .distance:
-            return 0 // Will be calculated based on pace
-        }
-    }
-}
-

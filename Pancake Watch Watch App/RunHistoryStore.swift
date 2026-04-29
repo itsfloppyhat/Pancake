@@ -21,13 +21,6 @@ final class RunHistoryStore: ObservableObject {
         }
     }
 
-    func addEvent(event: RunEvent) async {
-        await MainActor.run {
-            events.insert(event, at: 0)
-            save()
-        }
-    }
-
     func remove(event: RunEvent) {
         queue.async { [weak self] in
             DispatchQueue.main.async {
@@ -94,36 +87,5 @@ final class RunHistoryStore: ObservableObject {
 
     var mostRecentRunDate: Date? {
         events.first?.date
-    }
-
-    // MARK: - HealthKit Integration
-
-    nonisolated func importFromHealthKit() async throws -> Int {
-        let healthKitManager = await HealthKitManager.shared
-
-        guard await healthKitManager.isAuthorized else {
-            throw HealthKitError.notAuthorized
-        }
-
-        let importedEvents = try await healthKitManager.importRunningHistory()
-
-        let currentEvents = await MainActor.run { events }
-
-        let existingEventKeys = Set(currentEvents.map { "\($0.date.timeIntervalSince1970)-\($0.totalDistanceMeters)" })
-        let newEvents = importedEvents.filter { event in
-            let eventKey = "\(event.date.timeIntervalSince1970)-\(event.totalDistanceMeters)"
-            return !existingEventKeys.contains(eventKey)
-        }
-
-        for event in newEvents {
-            await addEvent(event: event)
-        }
-
-        return newEvents.count
-    }
-
-    func clearHealthKitData() {
-        events.removeAll()
-        save()
     }
 }

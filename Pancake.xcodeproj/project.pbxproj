@@ -385,12 +385,12 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Pancake/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Pancake;
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.sports";
-				INFOPLIST_KEY_NSAppleMusicUsageDescription = "Pancake needs access to your Apple Music library to create personalized playlists and suggest songs based on your running intensity and heart rate.";
-				INFOPLIST_KEY_NSHealthShareUsageDescription = "Pancake needs access to your health data to track your running workouts and save them to the Health app.";
-				INFOPLIST_KEY_NSHealthUpdateUsageDescription = "Pancake needs permission to save your running workouts to the Health app.";
-				INFOPLIST_KEY_NSLocationAlwaysAndWhenInUseUsageDescription = "Pancake needs location access to track your outdoor runs and calculate distance and pace.";
-				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Pancake needs location access to track your outdoor runs and calculate distance and pace.";
+				INFOPLIST_KEY_NSAppleMusicUsageDescription = "Pancake uses Apple Music to learn your taste from your library and playlists, and to play generated song suggestions during your runs.";
+				INFOPLIST_KEY_NSHealthShareUsageDescription = "Pancake reads your workout and heart-rate data so it can guide runs, adapt music, and import your running history.";
+				INFOPLIST_KEY_NSHealthUpdateUsageDescription = "Pancake saves completed workouts to Health so your run history stays consistent.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Pancake uses your location during runs to measure outdoor distance, pace, and segment progress.";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
@@ -403,7 +403,7 @@
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				IPHONEOS_DEPLOYMENT_TARGET = 18.5;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 15.5;
@@ -440,12 +440,12 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Pancake/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Pancake;
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.sports";
-				INFOPLIST_KEY_NSAppleMusicUsageDescription = "Pancake needs access to your Apple Music library to create personalized playlists and suggest songs based on your running intensity and heart rate.";
-				INFOPLIST_KEY_NSHealthShareUsageDescription = "Pancake needs access to your health data to track your running workouts and save them to the Health app.";
-				INFOPLIST_KEY_NSHealthUpdateUsageDescription = "Pancake needs permission to save your running workouts to the Health app.";
-				INFOPLIST_KEY_NSLocationAlwaysAndWhenInUseUsageDescription = "Pancake needs location access to track your outdoor runs and calculate distance and pace.";
-				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Pancake needs location access to track your outdoor runs and calculate distance and pace.";
+				INFOPLIST_KEY_NSAppleMusicUsageDescription = "Pancake uses Apple Music to learn your taste from your library and playlists, and to play generated song suggestions during your runs.";
+				INFOPLIST_KEY_NSHealthShareUsageDescription = "Pancake reads your workout and heart-rate data so it can guide runs, adapt music, and import your running history.";
+				INFOPLIST_KEY_NSHealthUpdateUsageDescription = "Pancake saves completed workouts to Health so your run history stays consistent.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Pancake uses your location during runs to measure outdoor distance, pace, and segment progress.";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
@@ -458,7 +458,7 @@
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
-				IPHONEOS_DEPLOYMENT_TARGET = 18.5;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 15.5;
@@ -489,9 +489,9 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "Pancake Watch";
-				INFOPLIST_KEY_NSHealthShareUsageDescription = "This app reads your workout and health data to track runs and show heart rate, distance, and calories.";
-				INFOPLIST_KEY_NSHealthUpdateUsageDescription = "This app writes your workout and health data to save your runs.";
-				INFOPLIST_KEY_NSLocationAlwaysAndWhenInUseUsageDescription = "We use GPS to track your run progress";
+				INFOPLIST_KEY_NSHealthShareUsageDescription = "Pancake Watch reads workout and heart-rate data to guide your run and show live progress.";
+				INFOPLIST_KEY_NSHealthUpdateUsageDescription = "Pancake Watch saves completed workouts to Health.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Pancake Watch uses GPS during runs to measure outdoor distance, pace, and progress.";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
 				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = "com.Matthew-Lucas.Hello-World.Pancake";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -522,9 +522,9 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "Pancake Watch";
-				INFOPLIST_KEY_NSHealthShareUsageDescription = "This app reads your workout and health data to track runs and show heart rate, distance, and calories.";
-				INFOPLIST_KEY_NSHealthUpdateUsageDescription = "This app writes your workout and health data to save your runs.";
-				INFOPLIST_KEY_NSLocationAlwaysAndWhenInUseUsageDescription = "We use GPS to track your run progress";
+				INFOPLIST_KEY_NSHealthShareUsageDescription = "Pancake Watch reads workout and heart-rate data to guide your run and show live progress.";
+				INFOPLIST_KEY_NSHealthUpdateUsageDescription = "Pancake Watch saves completed workouts to Health.";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "Pancake Watch uses GPS during runs to measure outdoor distance, pace, and progress.";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
 				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = "com.Matthew-Lucas.Hello-World.Pancake";
 				LD_RUNPATH_SEARCH_PATHS = (

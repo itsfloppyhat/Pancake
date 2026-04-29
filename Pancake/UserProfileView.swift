@@ -2,6 +2,7 @@ import SwiftUI
 
 struct UserProfileView: View {
     @StateObject private var viewModel = UserProfileViewModel()
+    @StateObject private var onboarding = OnboardingManager.shared
     
     var body: some View {
         NavigationView {
@@ -16,39 +17,57 @@ struct UserProfileView: View {
                     // Settings Sections
                     VStack(spacing: 16) {
                         SettingsSectionView(
+                            title: "Setup Guide",
+                            subtitle: onboarding.activationReady ? "Ready for your first run" : "Finish first-run setup",
+                            icon: "checklist",
+                            color: .pastelPeach
+                        ) {
+                            onboarding.resetOnboarding()
+                        }
+
+                        SettingsSectionView(
                             title: "Music Preferences",
-                            subtitle: viewModel.userProfile.musicPreferences.favoriteArtists.isEmpty && viewModel.userProfile.musicPreferences.favoriteSongs.isEmpty ? "Tap to set up" : "\(viewModel.userProfile.musicPreferences.favoriteArtists.count) artists, \(viewModel.userProfile.musicPreferences.favoriteSongs.count) songs",
+                            subtitle: musicPreferencesSubtitle,
                             icon: "music.note.list",
-                            color: .purple
+                            color: .pastelLavender
                         ) {
                             viewModel.showMusicPreferences()
                         }
-                        
+
                         SettingsSectionView(
                             title: "Running Goals",
                             subtitle: String(format: "%.1f km/week", viewModel.userProfile.runningGoals.weeklyDistanceGoal),
                             icon: "target",
-                            color: .green
+                            color: .pastelMint
                         ) {
                             viewModel.showRunningGoals()
                         }
-                        
+
                         SettingsSectionView(
                             title: "Personal Info",
                             subtitle: viewModel.userProfile.personalInfo.displayName.isEmpty ? "Tap to set up" : viewModel.userProfile.personalInfo.displayName,
                             icon: "person.circle",
-                            color: .blue
+                            color: .pastelPeriwinkle
                         ) {
                             viewModel.showPersonalInfo()
                         }
-                        
+
                         SettingsSectionView(
                             title: "AI Music Curation",
-                            subtitle: viewModel.isChatGPTConfigured ? "ChatGPT Connected" : "Set up OpenAI API key",
+                            subtitle: viewModel.isAIConfigured ? "Apple Intelligence Ready" : "Check AI Settings",
                             icon: "brain.head.profile",
-                            color: .purple
+                            color: .pastelRose
                         ) {
-                            viewModel.showChatGPTSettings()
+                            viewModel.showAISettings()
+                        }
+
+                        SettingsSectionView(
+                            title: "Song Check",
+                            subtitle: "Preview a generated song without starting a run",
+                            icon: "slider.horizontal.3",
+                            color: .pastelPeach
+                        ) {
+                            viewModel.showPromptLab()
                         }
                         
                         HealthKitImportSectionView()
@@ -69,10 +88,29 @@ struct UserProfileView: View {
             .sheet(isPresented: $viewModel.showingPersonalInfo) {
                 PersonalInfoView()
             }
-            .sheet(isPresented: $viewModel.showingChatGPTSettings) {
-                ChatGPTSettingsView()
+            .sheet(isPresented: $viewModel.showingAISettings) {
+                AISettingsView()
+            }
+            .sheet(isPresented: $viewModel.showingPromptLab) {
+                PromptLabView()
             }
         }
+    }
+
+    private var musicPreferencesSubtitle: String {
+        let preferences = viewModel.userProfile.musicPreferences
+        let artistCount = preferences.allFavoriteArtists.count
+        let songCount = preferences.allFavoriteSongs.count
+
+        if let playlist = preferences.selectedPlaylist {
+            return "Taste sample: \(playlist.name) • \(artistCount) artists, \(songCount) songs"
+        }
+
+        if artistCount == 0 && songCount == 0 {
+            return "Tap to set up"
+        }
+
+        return "\(artistCount) artists, \(songCount) songs"
     }
 }
 
@@ -84,11 +122,7 @@ struct ProfileHeaderView: View {
         VStack(spacing: 16) {
             // Profile Picture Placeholder
             Circle()
-                .fill(LinearGradient(
-                    colors: [.blue, .purple],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                ))
+                .fill(LinearGradient.pastelProfile)
                 .frame(width: 80, height: 80)
                 .overlay(
                     Image(systemName: "person.fill")
@@ -106,9 +140,7 @@ struct ProfileHeaderView: View {
                     .foregroundStyle(.secondary)
             }
         }
-        .padding()
-        .background(Color(.systemGray6))
-        .cornerRadius(16)
+        .pastelTintedCard(.pastelLavender)
     }
 }
 
@@ -123,13 +155,13 @@ struct QuickStatsView: View {
         ], spacing: 16) {
             StatCardView(
                 title: "Favorite Artists",
-                value: "\(profile.musicPreferences.favoriteArtists.count)",
+                value: "\(profile.musicPreferences.allFavoriteArtists.count)",
                 icon: "music.mic"
             )
             
             StatCardView(
                 title: "Favorite Songs",
-                value: "\(profile.musicPreferences.favoriteSongs.count)",
+                value: "\(profile.musicPreferences.allFavoriteSongs.count)",
                 icon: "music.note"
             )
             
@@ -180,10 +212,7 @@ struct SettingsSectionView: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
-            .padding()
-            .background(Color(.systemBackground))
-            .cornerRadius(12)
-            .shadow(color: .black.opacity(0.1), radius: 2, x: 0, y: 1)
+            .bubblyCard()
         }
         .buttonStyle(PlainButtonStyle())
     }
@@ -195,40 +224,80 @@ struct MusicAuthorizationView: View {
     
     var body: some View {
         VStack(spacing: 12) {
-            HStack {
-                Image(systemName: "music.note")
-                    .foregroundColor(viewModel.isMusicAuthorized ? .green : .orange)
-                
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Apple Music")
-                        .font(.headline)
-                    
-                    Text(viewModel.isMusicAuthorized ? "Connected" : "Not Connected")
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
-                }
-                
-                Spacer()
-                
-                if !viewModel.isMusicAuthorized {
-                    Button("Connect") {
-                        viewModel.requestMusicAuthorization()
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
+            AuthorizationStatusRow(
+                icon: "music.note",
+                title: "Library Taste Import",
+                subtitle: viewModel.isLibraryAuthorized ? "Ready to import playlists, artists, songs, and genres" : "Not enabled",
+                isConnected: viewModel.isLibraryAuthorized,
+                actionTitle: "Connect Library"
+            ) {
+                viewModel.requestMusicAuthorization()
+            }
+
+            AuthorizationStatusRow(
+                icon: "play.circle",
+                title: "Apple Music Playback",
+                subtitle: viewModel.isCatalogAuthorized ? "Ready to play generated songs outside your library" : "Not enabled",
+                isConnected: viewModel.isCatalogAuthorized,
+                actionTitle: "Enable Playback"
+            ) {
+                Task {
+                    await viewModel.requestCatalogAuthorization()
                 }
             }
-            
+
+            Text("Library access helps Pancake learn your taste. Apple Music playback lets it play generated songs even when they are not already saved in your library.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.leading)
+
             if let error = viewModel.error {
                 Text(error.localizedDescription)
                     .font(.caption)
-                    .foregroundColor(.red)
+                    .foregroundColor(.pastelCoral)
                     .multilineTextAlignment(.center)
             }
         }
-        .padding()
-        .background(Color(.systemGray6))
-        .cornerRadius(12)
+        .pastelTintedCard(.pastelPeriwinkle)
+        .onAppear {
+            viewModel.refreshAuthorizationState()
+        }
+    }
+}
+
+struct AuthorizationStatusRow: View {
+    let icon: String
+    let title: String
+    let subtitle: String
+    let isConnected: Bool
+    let actionTitle: String
+    let action: () -> Void
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 12) {
+            Image(systemName: icon)
+                .foregroundColor(isConnected ? .pastelMint : .pastelPeach)
+                .frame(width: 20)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.headline)
+
+                Text(subtitle)
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+            }
+
+            Spacer()
+
+            if isConnected {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundColor(.pastelMint)
+            } else {
+                Button(actionTitle, action: action)
+                    .buttonStyle(BubblySmallButtonStyle(backgroundColor: .pastelPeriwinkle))
+            }
+        }
     }
 }
 
@@ -238,13 +307,68 @@ struct MusicPreferencesView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var showingArtistSearch = false
     @State private var showingSongSearch = false
+    @State private var showingPlaylistPicker = false
     @State private var isAutoPopulating = false
+    @State private var isImportingPlaylist = false
+    @State private var playlistError: Error?
     
     var body: some View {
         NavigationView {
             List {
-                // Auto-Populate Section
                 if profileManager.isMusicAuthorized {
+                    Section("Playlist Taste Sample") {
+                        if let playlist = profileManager.userProfile.musicPreferences.selectedPlaylist {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(playlist.name)
+                                    .font(.headline)
+
+                                Text("\(playlist.songCount) songs")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+
+                            if profileManager.userProfile.musicPreferences.hasImportedPlaylistContent {
+                                Text(importedPlaylistSummary)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+
+                            Button(action: importSelectedPlaylist) {
+                                HStack {
+                                    if isImportingPlaylist {
+                                        ProgressView()
+                                            .scaleEffect(0.8)
+                                    } else {
+                                        Image(systemName: "arrow.down.circle")
+                                            .foregroundColor(.pastelLavender)
+                                    }
+
+                                    Text("Import Taste Sample")
+                                }
+                            }
+                            .disabled(isImportingPlaylist)
+
+                            Button("Choose Different Taste Sample") {
+                                showingPlaylistPicker = true
+                            }
+                            .foregroundColor(.pastelPeriwinkle)
+
+                            Button("Clear Imported Taste Sample", role: .destructive) {
+                                profileManager.selectPlaylist(nil)
+                            }
+                        } else {
+                            Button("Choose Playlist Taste Sample") {
+                                showingPlaylistPicker = true
+                            }
+                            .foregroundColor(.pastelPeriwinkle)
+
+                            Text("Select an Apple Music playlist to teach Pancake the runner's taste. The playlist is used for artists, songs, and genres, not as a playback queue.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+
+                    // Auto-Populate Section
                     Section {
                         Button(action: autoPopulatePreferences) {
                             HStack {
@@ -253,15 +377,15 @@ struct MusicPreferencesView: View {
                                         .scaleEffect(0.8)
                                 } else {
                                     Image(systemName: "sparkles")
-                                        .foregroundColor(.blue)
+                                        .foregroundColor(.pastelLavender)
                                 }
                                 
                                 VStack(alignment: .leading, spacing: 2) {
-                                    Text("Auto-Populate from Apple Music")
+                                    Text("Auto-Populate from Entire Library")
                                         .font(.headline)
                                         .foregroundColor(.primary)
                                     
-                                    Text("Import your most played artists, songs, and genres")
+                                    Text("Import your most played artists, songs, and genres from your full library")
                                         .font(.caption)
                                         .foregroundColor(.secondary)
                                 }
@@ -270,6 +394,14 @@ struct MusicPreferencesView: View {
                             }
                         }
                         .disabled(isAutoPopulating)
+                    }
+                }
+
+                if let playlistError {
+                    Section {
+                        Text(playlistError.localizedDescription)
+                            .font(.caption)
+                            .foregroundColor(.pastelCoral)
                     }
                 }
                 
@@ -288,7 +420,7 @@ struct MusicPreferencesView: View {
                     Button("Add Artists") {
                         showingArtistSearch = true
                     }
-                    .foregroundColor(.blue)
+                    .foregroundColor(.pastelLavender)
                 }
                 
                 // Favorite Songs Section
@@ -306,7 +438,7 @@ struct MusicPreferencesView: View {
                     Button("Add Songs") {
                         showingSongSearch = true
                     }
-                    .foregroundColor(.blue)
+                    .foregroundColor(.pastelLavender)
                 }
                 
                 // Genres Section
@@ -345,6 +477,17 @@ struct MusicPreferencesView: View {
             .sheet(isPresented: $showingSongSearch) {
                 SongSearchView()
             }
+            .sheet(isPresented: $showingPlaylistPicker) {
+                PlaylistPickerView(
+                    selectedPlaylistID: profileManager.userProfile.musicPreferences.selectedPlaylist?.id
+                ) { playlist in
+                    profileManager.selectPlaylist(playlist)
+                    playlistError = nil
+                }
+            }
+            .onAppear {
+                profileManager.refreshMusicAuthorizationStates()
+            }
         }
     }
     
@@ -372,6 +515,30 @@ struct MusicPreferencesView: View {
                 isAutoPopulating = false
             }
         }
+    }
+
+    private func importSelectedPlaylist() {
+        isImportingPlaylist = true
+        playlistError = nil
+
+        Task {
+            do {
+                try await profileManager.importSelectedPlaylistPreferences()
+            } catch {
+                await MainActor.run {
+                    playlistError = error
+                }
+            }
+
+            await MainActor.run {
+                isImportingPlaylist = false
+            }
+        }
+    }
+
+    private var importedPlaylistSummary: String {
+        let preferences = profileManager.userProfile.musicPreferences
+        return "Taste sample added: \(preferences.importedPlaylistSongs.count) songs, \(preferences.importedPlaylistArtists.count) artists, and \(preferences.importedPlaylistGenres.count) genres."
     }
 }
 
@@ -457,7 +624,7 @@ struct GenreRowView: View {
             
             Button(action: onToggle) {
                 Image(systemName: genre.isSelected ? "checkmark.circle.fill" : "circle")
-                    .foregroundColor(genre.isSelected ? .blue : .gray)
+                    .foregroundColor(genre.isSelected ? .pastelLavender : .gray)
             }
         }
     }
@@ -739,7 +906,7 @@ struct ArtistSearchView: View {
                 if let error = searchError {
                     Text("Error: \(error.localizedDescription)")
                         .font(.caption)
-                        .foregroundColor(.red)
+                        .foregroundColor(.pastelCoral)
                         .padding()
                 }
             }
@@ -854,7 +1021,7 @@ struct SongSearchView: View {
                 if let error = searchError {
                     Text("Error: \(error.localizedDescription)")
                         .font(.caption)
-                        .foregroundColor(.red)
+                        .foregroundColor(.pastelCoral)
                         .padding()
                 }
             }
@@ -893,6 +1060,105 @@ struct SongSearchView: View {
     }
 }
 
+struct PlaylistPickerView: View {
+    @StateObject private var profileManager = UserProfileManager.shared
+    @Environment(\.dismiss) private var dismiss
+
+    let selectedPlaylistID: String?
+    let onSelect: (ImportedPlaylist) -> Void
+
+    @State private var playlists: [ImportedPlaylist] = []
+    @State private var isLoading = true
+    @State private var loadError: Error?
+
+    var body: some View {
+        NavigationView {
+            Group {
+                if isLoading {
+                    ProgressView("Loading playlist taste samples...")
+                } else if let loadError {
+                    VStack(spacing: 12) {
+                        Image(systemName: "exclamationmark.triangle")
+                            .font(.title2)
+                            .foregroundColor(.pastelCoral)
+
+                        Text(loadError.localizedDescription)
+                            .font(.caption)
+                            .multilineTextAlignment(.center)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding()
+                } else if playlists.isEmpty {
+                    VStack(spacing: 12) {
+                        Image(systemName: "music.note.list")
+                            .font(.title2)
+                            .foregroundColor(.secondary)
+
+                        Text("No playlists found in your library")
+                            .font(.headline)
+
+                        Text("Add an Apple Music playlist to your library, then return here to use it as a taste sample.")
+                            .font(.caption)
+                            .multilineTextAlignment(.center)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding()
+                } else {
+                    List(playlists) { playlist in
+                        Button {
+                            onSelect(playlist)
+                            dismiss()
+                        } label: {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(playlist.name)
+                                        .foregroundColor(.primary)
+
+                                    Text("\(playlist.songCount) songs")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+
+                                Spacer()
+
+                                if playlist.id == selectedPlaylistID {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .foregroundColor(.pastelMint)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Choose Taste Sample")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("Cancel") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+        .task {
+            await loadPlaylists()
+        }
+    }
+
+    private func loadPlaylists() async {
+        isLoading = true
+        loadError = nil
+
+        do {
+            playlists = try await profileManager.fetchPlaylists()
+        } catch {
+            loadError = error
+        }
+
+        isLoading = false
+    }
+}
+
 // MARK: - Search Row Views
 struct ArtistSearchRowView: View {
     let artist: MusicArtist
@@ -921,7 +1187,7 @@ struct ArtistSearchRowView: View {
                 isAdded = true
             }) {
                 Image(systemName: isAdded ? "checkmark.circle.fill" : "plus.circle")
-                    .foregroundColor(isAdded ? .green : .blue)
+                    .foregroundColor(isAdded ? .pastelMint : .pastelPeriwinkle)
                     .font(.title2)
             }
             .disabled(isAdded)
@@ -966,7 +1232,7 @@ struct SongSearchRowView: View {
                 isAdded = true
             }) {
                 Image(systemName: isAdded ? "checkmark.circle.fill" : "plus.circle")
-                    .foregroundColor(isAdded ? .green : .blue)
+                    .foregroundColor(isAdded ? .pastelMint : .pastelPeriwinkle)
                     .font(.title2)
             }
             .disabled(isAdded)
@@ -985,7 +1251,7 @@ struct HealthKitImportSectionView: View {
         VStack(spacing: 12) {
             HStack {
                 Image(systemName: "heart.text.square")
-                    .foregroundColor(.red)
+                    .foregroundColor(.pastelCoral)
                     .font(.title2)
                     .frame(width: 24)
                 
@@ -1016,10 +1282,12 @@ struct HealthKitImportSectionView: View {
                             .font(.subheadline)
                             .fontWeight(.medium)
                             .foregroundColor(.white)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 6)
-                            .background(historyViewModel.isHealthKitAuthorized ? Color.blue : Color.orange)
-                            .cornerRadius(8)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            .background(
+                                Capsule()
+                                    .fill(historyViewModel.isHealthKitAuthorized ? Color.pastelPeriwinkle : Color.pastelPeach)
+                            )
                     }
                 }
             }
@@ -1037,7 +1305,7 @@ struct HealthKitImportSectionView: View {
             if let error = historyViewModel.error {
                 Text("Error: \(error.localizedDescription)")
                     .font(.caption)
-                    .foregroundColor(.red)
+                    .foregroundColor(.pastelCoral)
                     .multilineTextAlignment(.leading)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -1049,13 +1317,11 @@ struct HealthKitImportSectionView: View {
                 }) {
                     Text("Clear All Data")
                         .font(.caption)
-                        .foregroundColor(.red)
+                        .foregroundColor(.pastelCoral)
                 }
             }
         }
-        .padding()
-        .background(Color(.systemGray6))
-        .cornerRadius(12)
+        .pastelTintedCard(.pastelCoral)
         .alert("Import Running History", isPresented: $showingImportAlert) {
             Button("Cancel", role: .cancel) { }
             Button("Import") {
@@ -1077,6 +1343,10 @@ struct HealthKitImportSectionView: View {
     }
 }
 
-#Preview {
-    UserProfileView()
+#if DEBUG
+struct UserProfileView_Previews: PreviewProvider {
+    static var previews: some View {
+        UserProfileView()
+    }
 }
+#endif

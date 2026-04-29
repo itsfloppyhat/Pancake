@@ -1,6 +1,4 @@
 import SwiftUI
-import WatchConnectivity
-import CoreLocation
 
 struct WorkoutProgressView: View {
     @ObservedObject var manager: WorkoutSessionManager
@@ -10,48 +8,60 @@ struct WorkoutProgressView: View {
     var onDismiss: (() -> Void)?
 
     var body: some View {
-        VStack(spacing: 4) {
-            // Timer - Large and prominent
-            if let startDate = manager.workoutStartDate {
-                TimerView(startDate: startDate, isRunning: manager.isRunning)
-            }
-            
-            // GPS Status Indicator
-            GPSStatusView(manager: manager)
-            
-            // Compact Metrics Grid - 3x2 layout
-            CompactMetricsGridView(manager: manager)
-            
-            // Current Segment - Compact
-            if manager.currentSegment != nil {
-                CompactCurrentSegmentView(segment: manager.currentSegment!, progress: manager.currentSegmentProgress)
-            }
-            
-            // Music Control and End Workout Button Row
-            HStack(spacing: 4) {
-                // Music Control (Adaptive)
-                if isStandaloneMode() {
-                    StandaloneMusicControlView()
-                } else {
+        ScrollView {
+            VStack(spacing: 4) {
+                // Timer - Large and prominent
+                if let startDate = manager.workoutStartDate {
+                    TimerView(startDate: startDate, isRunning: manager.isRunning)
+                }
+
+                // GPS Status Indicator
+                GPSStatusView(manager: manager)
+
+                if let warning = manager.liveMetricsWarning {
+                    LiveMetricsWarningView(message: warning)
+                }
+
+                // Compact Metrics Grid - 3x2 layout
+                CompactMetricsGridView(manager: manager)
+
+                // Current Segment - Compact
+                if let segment = manager.currentSegment {
+                    CompactCurrentSegmentView(segment: segment, progress: manager.currentSegmentProgress)
+                }
+
+                // Music Control and End Workout Button Row
+                HStack(spacing: 4) {
                     ConnectedMusicControlView()
+
+                    // Red End Workout Button
+                    Button(action: {
+                        showingEndConfirmation = true
+                    }) {
+                        Image(systemName: "stop.fill")
+                            .font(.title3)
+                            .foregroundColor(.white)
+                            .frame(width: 36, height: 36)
+                            .background(Color.red)
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                    }
+                    .buttonStyle(.plain)
                 }
-                
-                // Red End Workout Button
-                Button(action: {
-                    showingEndConfirmation = true
-                }) {
-                    Image(systemName: "stop.fill")
-                        .font(.title3)
-                        .foregroundColor(.white)
-                        .frame(width: 36, height: 36)
-                        .background(Color.red)
-                        .clipShape(RoundedRectangle(cornerRadius: 6))
-                }
-                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 4)
+            .padding(.vertical, 2)
+        }
+        .overlay {
+            if manager.showKmMilestone {
+                KmMilestoneOverlay(
+                    km: manager.lastKmMilestone,
+                    pace: currentPace
+                )
+                .transition(.opacity)
+                .animation(.easeInOut(duration: 0.3), value: manager.showKmMilestone)
+                .allowsHitTesting(false)
             }
         }
-        .padding(.horizontal, 4)
-        .padding(.vertical, 2)
         .alert("End Workout", isPresented: $showingEndConfirmation) {
             Button("Cancel", role: .cancel) { }
             Button("End Workout", role: .destructive) {
@@ -60,6 +70,14 @@ struct WorkoutProgressView: View {
         } message: {
             Text("Are you sure you want to end this workout?")
         }
+    }
+
+    private var currentPace: String? {
+        guard manager.displayedDistanceKm > 0 else { return nil }
+        let paceSeconds = manager.workoutDuration / manager.displayedDistanceKm
+        let minutes = Int(paceSeconds) / 60
+        let seconds = Int(paceSeconds) % 60
+        return String(format: "%d:%02d/km", minutes, seconds)
     }
     
     private func endWorkout() {
@@ -70,59 +88,48 @@ struct WorkoutProgressView: View {
         } else {
             totalSeconds = 0
         }
-        
-        let totalMeters: Int = Int(manager.distanceMeters > 0 ? manager.distanceMeters : (displayedDistanceKm * 1000.0))
-        
+
+        let totalMeters: Int = Int(manager.displayedDistanceKm * 1000.0)
+
         // Use the planned segments from the workout manager
         let segments = manager.plannedSegments.isEmpty ? [] : manager.plannedSegments
-        
-        // Build and save event
+
+        // Build and save event on Watch
         let event = RunEvent(totalDistanceMeters: totalMeters, totalTimeSeconds: totalSeconds, segments: segments)
         RunHistoryStore.shared.add(event: event)
-        
-        // Send workout completion to iPhone
-        WatchConnectivityManager.shared.sendWorkoutCompleted()
-        
+
+        // Send workout completion to iPhone with final distance/time data
+        // so the iPhone can also save the run event with accurate totals.
+        WatchConnectivityManager.shared.sendWorkoutCompleted(
+            totalDistanceKm: manager.displayedDistanceKm,
+            totalTimeSeconds: totalSeconds
+        )
+
+        // Now stop the workout session and dismiss
         manager.stopWorkout()
         onDismiss?()
     }
     
-    private func isStandaloneMode() -> Bool {
-        return !WCSession.default.isReachable
-    }
-
-    private var displayedDistanceKm: Double {
-        let hkKm = manager.distanceMeters / 1000.0
-        if hkKm > 0 { return hkKm }
-        return coreLocationDistanceKm
-    }
-
-    private var coreLocationDistanceKm: Double {
-        guard manager.locations.count > 1 else { return 0 }
-        var total: CLLocationDistance = 0
-        for i in 1..<manager.locations.count {
-            total += manager.locations[i].distance(from: manager.locations[i - 1])
-        }
-        return total / 1000.0
-    }
 }
 
-// MARK: - Workout Header View
-struct WorkoutHeaderView: View {
-    @ObservedObject var manager: WorkoutSessionManager
-    
+private struct LiveMetricsWarningView: View {
+    let message: String
+
     var body: some View {
-        VStack(spacing: 4) {
-            Text("Workout In Progress")
-                .font(.title2)
-                .fontWeight(.bold)
-            
-            if !manager.plannedSegments.isEmpty {
-                Text("\(manager.plannedSegments.count) segments planned")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
+        HStack(spacing: 6) {
+            Image(systemName: "heart.slash.fill")
+                .foregroundStyle(.yellow)
+
+            Text(message)
+                .font(.caption2)
+                .foregroundStyle(.primary)
+                .lineLimit(3)
+                .minimumScaleFactor(0.75)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(6)
+        .background(Color.yellow.opacity(0.18))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 }
 
@@ -145,7 +152,7 @@ struct CompactMetricsGridView: View {
             
             CompactMetricView(
                 title: "Distance",
-                value: String(format: "%.2f", displayedDistanceKm),
+                value: String(format: "%.2f", manager.displayedDistanceKm),
                 color: .green
             )
             
@@ -176,24 +183,9 @@ struct CompactMetricsGridView: View {
         }
     }
     
-    private var displayedDistanceKm: Double {
-        let hkKm = manager.distanceMeters / 1000.0
-        if hkKm > 0 { return hkKm }
-        return coreLocationDistanceKm
-    }
-    
-    private var coreLocationDistanceKm: Double {
-        guard manager.locations.count > 1 else { return 0 }
-        var total: CLLocationDistance = 0
-        for i in 1..<manager.locations.count {
-            total += manager.locations[i].distance(from: manager.locations[i - 1])
-        }
-        return total / 1000.0
-    }
-    
     private var formattedPace: String {
-        guard displayedDistanceKm > 0 else { return "--:--" }
-        let paceSeconds = manager.workoutDuration / displayedDistanceKm
+        guard manager.displayedDistanceKm > 0 else { return "--:--" }
+        let paceSeconds = manager.workoutDuration / manager.displayedDistanceKm
         let minutes = Int(paceSeconds) / 60
         let seconds = Int(paceSeconds) % 60
         return String(format: "%d:%02d", minutes, seconds)
@@ -385,6 +377,39 @@ struct GPSStatusView: View {
     }
 }
 
-#Preview {
-    WorkoutProgressView(manager: .shared)
+// MARK: - Km Milestone Overlay
+struct KmMilestoneOverlay: View {
+    let km: Int
+    let pace: String?
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.85)
+                .ignoresSafeArea()
+
+            VStack(spacing: 8) {
+                Image(systemName: "flag.checkered")
+                    .font(.system(size: 28))
+                    .foregroundStyle(.green)
+
+                Text("\(km) km")
+                    .font(.system(size: 36, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+
+                if let pace = pace {
+                    Text(pace)
+                        .font(.system(size: 16, weight: .medium, design: .monospaced))
+                        .foregroundStyle(.green)
+                }
+            }
+        }
+    }
 }
+
+#if DEBUG
+struct WorkoutProgressView_Previews: PreviewProvider {
+    static var previews: some View {
+        WorkoutProgressView(manager: .shared)
+    }
+}
+#endif

@@ -27,13 +27,15 @@ class MusicKitService: ObservableObject {
             self.authorizationStatus = status
             self.isAuthorized = (status == .authorized)
         }
-        print("🎵 MusicKit authorization status: \(status)")
+    }
+
+    func refreshAuthorizationStatus() {
+        updateAuthorizationStatus()
     }
     
     private func updateAuthorizationStatus() {
         authorizationStatus = MusicAuthorization.currentStatus
         isAuthorized = (authorizationStatus == .authorized)
-        print("🎵 Current MusicKit authorization: \(authorizationStatus)")
     }
     
     // MARK: - Search
@@ -85,30 +87,30 @@ class MusicKitService: ObservableObject {
             throw MusicKitError.notAuthorized
         }
         
-        do {
-            // Use MPMusicPlayerController for playback
-            let player = MPMusicPlayerController.applicationQueuePlayer
-            
-            // Create a queue descriptor with the song's store ID
-            let storeID = song.id.rawValue
-            let queue = MPMusicPlayerStoreQueueDescriptor(storeIDs: [storeID])
-            player.setQueue(with: queue)
-            player.play()
-            
+        // Use MPMusicPlayerController for playback
+        let player = MPMusicPlayerController.applicationQueuePlayer
+        
+        // Create a queue descriptor with the song's store ID
+        let storeID = song.id.rawValue
+        let queue = MPMusicPlayerStoreQueueDescriptor(storeIDs: [storeID])
+        player.setQueue(with: queue)
+        player.play()
+
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        guard player.playbackState == .playing else {
             await MainActor.run {
-                self.currentSong = song
-                self.isPlaying = true
-                self.playbackError = nil
+                self.playbackError = MusicKitError.playbackFailed
+                self.isPlaying = false
             }
-            
-            print("🎵 Playing Apple Music song: '\(song.title)' by \(song.artistName)")
-        } catch {
-            print("❌ Error playing Apple Music song: \(error)")
-            await MainActor.run {
-                self.playbackError = error
-            }
-            throw error
+            throw MusicKitError.playbackFailed
         }
+        
+        await MainActor.run {
+            self.currentSong = song
+            self.isPlaying = true
+            self.playbackError = nil
+        }
+        
     }
     
     func playSongs(_ songs: [Song]) async throws {
@@ -116,31 +118,25 @@ class MusicKitService: ObservableObject {
             throw MusicKitError.notAuthorized
         }
         
-        do {
-            let player = MPMusicPlayerController.applicationQueuePlayer
-            let storeIDs = songs.map { $0.id.rawValue }
+        let player = MPMusicPlayerController.applicationQueuePlayer
+        let storeIDs = songs.map { $0.id.rawValue }
+        
+        if !storeIDs.isEmpty {
+            let queue = MPMusicPlayerStoreQueueDescriptor(storeIDs: storeIDs)
+            player.setQueue(with: queue)
+            player.play()
             
-            if !storeIDs.isEmpty {
-                let queue = MPMusicPlayerStoreQueueDescriptor(storeIDs: storeIDs)
-                player.setQueue(with: queue)
-                player.play()
-                
-                await MainActor.run {
-                    self.currentSong = songs.first
-                    self.isPlaying = true
-                    self.playbackError = nil
-                }
-                
-                print("🎵 Playing Apple Music playlist with \(songs.count) songs")
-            } else {
-                throw MusicKitError.playbackFailed
-            }
-        } catch {
-            print("❌ Error playing Apple Music playlist: \(error)")
             await MainActor.run {
-                self.playbackError = error
+                self.currentSong = songs.first
+                self.isPlaying = true
+                self.playbackError = nil
             }
-            throw error
+            
+        } else {
+            await MainActor.run {
+                self.playbackError = MusicKitError.playbackFailed
+            }
+            throw MusicKitError.playbackFailed
         }
     }
     
@@ -190,19 +186,13 @@ class MusicKitService: ObservableObject {
     @objc private func nowPlayingItemDidChange() {
         Task { @MainActor in
             // Update current song if needed
-            if let nowPlayingItem = musicPlayer.nowPlayingItem {
-                // Convert MPMediaItem to Song if possible
-                // This is a simplified approach - in practice you might need more complex conversion
-                print("🎵 Now playing: \(nowPlayingItem.title ?? "Unknown") by \(nowPlayingItem.artist ?? "Unknown")")
-            }
         }
     }
-    
+
     @objc private func playbackStateDidChange() {
         Task { @MainActor in
             let state = musicPlayer.playbackState
             self.isPlaying = (state == .playing)
-            print("🎵 Playback state changed: \(state.rawValue)")
         }
     }
     

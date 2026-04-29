@@ -2,29 +2,6 @@ import Foundation
 import WatchConnectivity
 import Combine
 
-// MARK: - Message Types (shared with iOS app)
-enum WatchMessageType: String, CaseIterable {
-    // Run Planning
-    case runPlan = "runPlan"
-    case startRun = "startRun"
-    
-    // Workout Management
-    case workoutStart = "workoutStart"
-    case workoutStop = "workoutStop"
-    case workoutUpdate = "workoutUpdate"
-    case workoutCompleted = "workoutCompleted"
-    case workoutStarted = "workoutStarted"
-    
-    // Music Control
-    case requestMusicSuggestion = "requestMusicSuggestion"
-    case playbackControl = "playbackControl"
-    case currentSong = "currentSong"
-    case musicSuggestion = "musicSuggestion"
-    
-    // Health Data
-    case workoutHeartRate = "workoutHeartRate"
-}
-
 final class WatchConnectivityManager: NSObject, ObservableObject {
     static let shared = WatchConnectivityManager()
     
@@ -32,6 +9,9 @@ final class WatchConnectivityManager: NSObject, ObservableObject {
     @Published var hasReceivedRunPlan = false
     @Published var lastError: Error?
     
+    // iPhone connectivity
+    @Published var isReachable: Bool = false
+
     // Music state from iPhone
     @Published var currentSong: MusicSong?
     @Published var isPlaying: Bool = false
@@ -50,32 +30,45 @@ final class WatchConnectivityManager: NSObject, ObservableObject {
         guard WCSession.isSupported() else { return }
         
         let message = ["type": WatchMessageType.workoutStarted.rawValue] as [String : Any]
-        
-        WCSession.default.sendMessage(message, replyHandler: { response in
-            DispatchQueue.main.async {
-                print("Workout started message sent: \(response)")
-            }
-        }, errorHandler: { error in
-            DispatchQueue.main.async {
-                self.lastError = error
-            }
-        })
+
+        if WCSession.default.isReachable {
+            WCSession.default.sendMessage(message, replyHandler: { _ in
+                DispatchQueue.main.async { }
+            }, errorHandler: { [weak self] error in
+                WCSession.default.transferUserInfo(message)
+                DispatchQueue.main.async {
+                    self?.lastError = error
+                }
+            })
+        } else {
+            WCSession.default.transferUserInfo(message)
+        }
     }
     
-    func sendWorkoutCompleted() {
+    func sendWorkoutCompleted(totalDistanceKm: Double = 0, totalTimeSeconds: Int = 0) {
         guard WCSession.isSupported() else { return }
-        
-        let message = ["type": WatchMessageType.workoutCompleted.rawValue] as [String : Any]
-        
-        WCSession.default.sendMessage(message, replyHandler: { response in
-            DispatchQueue.main.async {
-                print("Workout completed message sent: \(response)")
-            }
-        }, errorHandler: { error in
-            DispatchQueue.main.async {
-                self.lastError = error
-            }
-        })
+
+        let message: [String: Any] = [
+            "type": WatchMessageType.workoutCompleted.rawValue,
+            "totalDistanceKm": totalDistanceKm,
+            "totalTimeSeconds": totalTimeSeconds
+        ]
+
+        // Use sendMessage for immediate delivery, with transferUserInfo fallback
+        if WCSession.default.isReachable {
+            WCSession.default.sendMessage(message, replyHandler: { response in
+                DispatchQueue.main.async { }
+            }, errorHandler: { [weak self] error in
+                // If sendMessage fails, use transferUserInfo so it arrives eventually
+                WCSession.default.transferUserInfo(message)
+                DispatchQueue.main.async {
+                    self?.lastError = error
+                }
+            })
+        } else {
+            // Watch not reachable — use transferUserInfo for background delivery
+            WCSession.default.transferUserInfo(message)
+        }
     }
     
     func clearReceivedRunPlan() {
@@ -91,110 +84,81 @@ extension WatchConnectivityManager: WCSessionDelegate {
             if let error = error {
                 self.lastError = error
             }
+            self.isReachable = session.isReachable
+        }
+    }
+
+    func sessionReachabilityDidChange(_ session: WCSession) {
+        DispatchQueue.main.async {
+            self.isReachable = session.isReachable
+        }
+    }
+
+    func session(_ session: WCSession, didReceiveUserInfo userInfo: [String : Any] = [:]) {
+        DispatchQueue.main.async {
+            self.handleIncomingMessage(userInfo)
+        }
+    }
+
+    func session(_ session: WCSession, didReceiveApplicationContext applicationContext: [String : Any]) {
+        DispatchQueue.main.async {
+            self.handleIncomingMessage(applicationContext)
         }
     }
     
     func session(_ session: WCSession, didReceiveMessage message: [String : Any]) {
         DispatchQueue.main.async {
-            if let type = message["type"] as? String {
-                switch type {
-                case WatchMessageType.runPlan.rawValue:
-                    if let segmentsData = message["segments"] as? Data {
-                        do {
-                            let segments = try JSONDecoder().decode([RunSegment].self, from: segmentsData)
-                            self.receivedRunPlan = segments
-                            self.hasReceivedRunPlan = true
-                            print("Received run plan with \(segments.count) segments")
-                        } catch {
-                            self.lastError = error
-                        }
-                    }
-                case WatchMessageType.startRun.rawValue:
-                    // Handle start run request from iPhone
-                    print("Received start run request from iPhone")
-                case WatchMessageType.currentSong.rawValue:
-                    // Handle current song update from iPhone
-                    if let songData = message["song"] as? Data {
-                        do {
-                            let song = try JSONDecoder().decode(MusicSong.self, from: songData)
-                            self.currentSong = song
-                            print("Received current song: \(song.title) by \(song.artist)")
-                        } catch {
-                            print("Failed to decode current song: \(error)")
-                        }
-                    }
-                case WatchMessageType.playbackControl.rawValue:
-                    // Handle playback state update from iPhone
-                    if let isPlaying = message["isPlaying"] as? Bool {
-                        self.isPlaying = isPlaying
-                        print("Received playback state: \(isPlaying ? "playing" : "paused")")
-                    }
-                    if let state = message["state"] as? String {
-                        self.playbackState = state
-                        print("Received playback state: \(state)")
-                    }
-                default:
-                    break
-                }
-            }
+            self.handleIncomingMessage(message)
         }
     }
     
     func session(_ session: WCSession, didReceiveMessage message: [String : Any], replyHandler: @escaping ([String : Any]) -> Void) {
         DispatchQueue.main.async {
-            if let type = message["type"] as? String {
-                switch type {
-                case WatchMessageType.runPlan.rawValue:
-                    if let segmentsData = message["segments"] as? Data {
-                        do {
-                            let segments = try JSONDecoder().decode([RunSegment].self, from: segmentsData)
-                            self.receivedRunPlan = segments
-                            self.hasReceivedRunPlan = true
-                            print("Received run plan with \(segments.count) segments")
-                            replyHandler(["status": "success"])
-                        } catch {
-                            self.lastError = error
-                            replyHandler(["status": "error", "message": error.localizedDescription])
-                        }
-                    } else {
-                        replyHandler(["status": "error", "message": "Invalid segments data"])
-                    }
-                case WatchMessageType.startRun.rawValue:
-                    // Handle start run request from iPhone
-                    print("Received start run request from iPhone")
-                    replyHandler(["status": "success"])
-                case WatchMessageType.currentSong.rawValue:
-                    // Handle current song update from iPhone
-                    if let songData = message["song"] as? Data {
-                        do {
-                            let song = try JSONDecoder().decode(MusicSong.self, from: songData)
-                            self.currentSong = song
-                            print("Received current song: \(song.title) by \(song.artist)")
-                            replyHandler(["status": "success"])
-                        } catch {
-                            print("Failed to decode current song: \(error)")
-                            replyHandler(["status": "error", "message": error.localizedDescription])
-                        }
-                    } else {
-                        replyHandler(["status": "error", "message": "Invalid song data"])
-                    }
-                case WatchMessageType.playbackControl.rawValue:
-                    // Handle playback state update from iPhone
-                    if let isPlaying = message["isPlaying"] as? Bool {
-                        self.isPlaying = isPlaying
-                        print("Received playback state: \(isPlaying ? "playing" : "paused")")
-                    }
-                    if let state = message["state"] as? String {
-                        self.playbackState = state
-                        print("Received playback state: \(state)")
-                    }
-                    replyHandler(["status": "success"])
-                default:
-                    replyHandler(["status": "error", "message": "Unknown message type"])
+            self.handleIncomingMessage(message)
+            replyHandler(["status": "success"])
+        }
+    }
+
+    private func handleIncomingMessage(_ message: [String: Any]) {
+        guard let type = message["type"] as? String else {
+            return
+        }
+
+        switch type {
+        case WatchMessageType.runPlan.rawValue:
+            if let segmentsData = message["segments"] as? Data {
+                do {
+                    let segments = try JSONDecoder().decode([RunSegment].self, from: segmentsData)
+                    self.receivedRunPlan = segments
+                    self.hasReceivedRunPlan = true
+                } catch {
+                    self.lastError = error
                 }
-            } else {
-                replyHandler(["status": "error", "message": "No message type"])
             }
+        case WatchMessageType.startRun.rawValue:
+            break
+        case WatchMessageType.currentSong.rawValue:
+            if let hasSong = message["hasSong"] as? Bool, !hasSong {
+                self.currentSong = nil
+                return
+            }
+            if let songData = message["song"] as? Data {
+                do {
+                    let song = try JSONDecoder().decode(MusicSong.self, from: songData)
+                    self.currentSong = song
+                } catch {
+                    print("Failed to decode current song: \(error)")
+                }
+            }
+        case WatchMessageType.playbackControl.rawValue:
+            if let isPlaying = message["isPlaying"] as? Bool {
+                self.isPlaying = isPlaying
+            }
+            if let state = message["state"] as? String {
+                self.playbackState = state
+            }
+        default:
+            break
         }
     }
 }

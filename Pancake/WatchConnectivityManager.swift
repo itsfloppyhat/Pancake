@@ -8,29 +8,7 @@ extension Notification.Name {
     static let workoutControl = Notification.Name("workoutControl")
     static let workoutHeartRate = Notification.Name("workoutHeartRate")
     static let segmentChanged = Notification.Name("segmentChanged")
-}
-
-// MARK: - Message Types
-enum WatchMessageType: String, CaseIterable {
-    // Run Planning
-    case runPlan = "runPlan"
-    case startRun = "startRun"
-    
-    // Workout Management
-    case workoutStart = "workoutStart"
-    case workoutStop = "workoutStop"
-    case workoutUpdate = "workoutUpdate"
-    case workoutCompleted = "workoutCompleted"
-    case workoutStarted = "workoutStarted"
-    
-    // Music Control
-    case requestMusicSuggestion = "requestMusicSuggestion"
-    case playbackControl = "playbackControl"
-    case currentSong = "currentSong"
-    case musicSuggestion = "musicSuggestion"
-    
-    // Health Data
-    case workoutHeartRate = "workoutHeartRate"
+    static let workoutUpdate = Notification.Name("workoutUpdate")
 }
 
 final class WatchConnectivityManager: ObservableObject {

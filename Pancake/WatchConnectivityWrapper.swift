@@ -61,23 +61,20 @@ final class WatchConnectivityWrapper: NSObject, ObservableObject {
             lastError = WatchConnectivityError.notSupported
             return
         }
-        
+
         guard WCSession.default.isPaired else {
             lastError = WatchConnectivityError.watchNotPaired
             return
         }
-        
+
         guard WCSession.default.isWatchAppInstalled else {
             lastError = WatchConnectivityError.watchAppNotInstalled
             return
         }
-        
+
         let message = ["type": WatchMessageType.startRun.rawValue] as [String : Any]
-        
-        WCSession.default.sendMessage(message, replyHandler: { response in
-            DispatchQueue.main.async {
-                print("Start run request sent: \(response)")
-            }
+
+        WCSession.default.sendMessage(message, replyHandler: { _ in
         }, errorHandler: { error in
             DispatchQueue.main.async {
                 self.lastError = error
@@ -86,64 +83,50 @@ final class WatchConnectivityWrapper: NSObject, ObservableObject {
     }
     
     func sendMessage(_ message: [String: Any], errorHandler: @escaping (Error) -> Void) {
-        print("📤 Attempting to send message: \(message["type"] ?? "unknown")")
-        
         guard WCSession.isSupported() else {
-            print("❌ WatchConnectivity not supported")
             errorHandler(WatchConnectivityError.notSupported)
             return
         }
-        
+
         guard WCSession.default.isPaired else {
-            print("❌ Watch not paired")
             errorHandler(WatchConnectivityError.watchNotPaired)
             return
         }
-        
+
         guard WCSession.default.isWatchAppInstalled else {
-            print("❌ Watch app not installed")
             errorHandler(WatchConnectivityError.watchAppNotInstalled)
             return
         }
-        
+
         guard WCSession.default.isReachable else {
-            print("❌ Watch not reachable")
             errorHandler(WatchConnectivityError.watchNotReachable)
             return
         }
-        
-        print("✅ Sending message to Watch")
+
         WCSession.default.sendMessage(message, replyHandler: nil, errorHandler: errorHandler)
     }
     
     func sendMessageWithFallback(_ message: [String: Any], errorHandler: @escaping (Error) -> Void) {
-        print("📤 Attempting to send message with fallback: \(message["type"] ?? "unknown")")
-        
         guard WCSession.isSupported() else {
-            print("❌ WatchConnectivity not supported")
             errorHandler(WatchConnectivityError.notSupported)
             return
         }
-        
+
         guard WCSession.default.isPaired else {
-            print("❌ Watch not paired")
             errorHandler(WatchConnectivityError.watchNotPaired)
             return
         }
-        
+
         guard WCSession.default.isWatchAppInstalled else {
-            print("❌ Watch app not installed")
             errorHandler(WatchConnectivityError.watchAppNotInstalled)
             return
         }
-        
+
         if WCSession.default.isReachable {
             // Try immediate message first
-            print("✅ Watch reachable, sending immediate message")
             WCSession.default.sendMessage(message, replyHandler: nil, errorHandler: errorHandler)
         } else {
             // Fallback to transferUserInfo for unreachable watch
-            print("⚠️ Watch not reachable, using transferUserInfo fallback")
             WCSession.default.transferUserInfo(message)
         }
     }
@@ -154,11 +137,9 @@ extension WatchConnectivityWrapper: WCSessionDelegate {
     func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) {
         DispatchQueue.main.async {
             if let error = error {
-                print("❌ WatchConnectivity activation failed: \(error.localizedDescription)")
+                print("WatchConnectivity activation failed: \(error.localizedDescription)")
                 self.lastError = error
             } else {
-                print("✅ WatchConnectivity activated successfully")
-                print("📱 Watch Status - Paired: \(session.isPaired), App Installed: \(session.isWatchAppInstalled), Reachable: \(session.isReachable)")
                 self.isWatchPaired = session.isPaired
                 self.isWatchAppInstalled = session.isWatchAppInstalled
                 self.isWatchReachable = session.isReachable
@@ -168,28 +149,24 @@ extension WatchConnectivityWrapper: WCSessionDelegate {
     
     func sessionDidBecomeInactive(_ session: WCSession) {
         DispatchQueue.main.async {
-            print("⚠️ WatchConnectivity session became inactive")
             self.isWatchReachable = false
         }
     }
-    
+
     func sessionDidDeactivate(_ session: WCSession) {
         DispatchQueue.main.async {
-            print("⚠️ WatchConnectivity session deactivated")
             self.isWatchReachable = false
         }
     }
-    
+
     func sessionReachabilityDidChange(_ session: WCSession) {
         DispatchQueue.main.async {
-            print("📡 Watch reachability changed: \(session.isReachable)")
             self.isWatchReachable = session.isReachable
         }
     }
-    
+
     func sessionWatchStateDidChange(_ session: WCSession) {
         DispatchQueue.main.async {
-            print("📱 Watch state changed - Paired: \(session.isPaired), App Installed: \(session.isWatchAppInstalled), Reachable: \(session.isReachable)")
             self.isWatchPaired = session.isPaired
             self.isWatchAppInstalled = session.isWatchAppInstalled
             self.isWatchReachable = session.isReachable
@@ -198,46 +175,57 @@ extension WatchConnectivityWrapper: WCSessionDelegate {
     
     func session(_ session: WCSession, didReceiveMessage message: [String : Any]) {
         DispatchQueue.main.async {
-            print("📨 Received message from Watch: \(message)")
-            if let type = message["type"] as? String {
-                switch type {
-                case WatchMessageType.workoutCompleted.rawValue:
-                    // Handle workout completion from watch
-                    print("✅ Workout completed on watch")
-                case WatchMessageType.workoutStarted.rawValue:
-                    // Handle workout start confirmation from watch
-                    print("✅ Workout started on watch")
-                case WatchMessageType.requestMusicSuggestion.rawValue:
-                    // Forward to WorkoutMusicCoordinator
-                    print("🎵 Forwarding music suggestion request to WorkoutMusicCoordinator")
-                    NotificationCenter.default.post(name: .requestMusicSuggestion, object: message)
-                case WatchMessageType.playbackControl.rawValue:
-                    // Forward to WorkoutMusicCoordinator
-                    print("🎵 Forwarding playback control to WorkoutMusicCoordinator")
-                    NotificationCenter.default.post(name: .playbackControl, object: message)
-                case "musicControl":
-                    // Handle music control from watch
-                    print("🎵 Forwarding music control to WorkoutMusicCoordinator")
-                    NotificationCenter.default.post(name: .playbackControl, object: message)
-                case "workoutControl":
-                    // Handle workout control from watch
-                    print("🏃 Forwarding workout control to WorkoutMusicCoordinator")
-                    NotificationCenter.default.post(name: .workoutControl, object: message)
-                case WatchMessageType.workoutHeartRate.rawValue:
-                    // Forward to WorkoutMusicCoordinator
-                    print("❤️ Forwarding heart rate update to WorkoutMusicCoordinator")
-                    NotificationCenter.default.post(name: .workoutHeartRate, object: message)
-                case "segment_changed":
-                    // Handle segment change from watch
-                    print("🏃 Forwarding segment change to WorkoutMusicCoordinator")
-                    NotificationCenter.default.post(name: .segmentChanged, object: message)
-                default:
-                    print("❓ Unknown message type received: \(type)")
-                    break
-                }
-            } else {
-                print("❌ Received message without type field")
-            }
+            self.handleWatchMessage(message)
+        }
+    }
+
+    func session(_ session: WCSession, didReceiveMessage message: [String : Any], replyHandler: @escaping ([String : Any]) -> Void) {
+        DispatchQueue.main.async {
+            self.handleWatchMessage(message)
+            replyHandler(["status": "success"])
+        }
+    }
+
+    func session(_ session: WCSession, didReceiveUserInfo userInfo: [String : Any] = [:]) {
+        DispatchQueue.main.async {
+            self.handleWatchMessage(userInfo)
+        }
+    }
+
+    func session(_ session: WCSession, didReceiveApplicationContext applicationContext: [String : Any]) {
+        DispatchQueue.main.async {
+            self.handleWatchMessage(applicationContext)
+        }
+    }
+
+    private func handleWatchMessage(_ message: [String: Any]) {
+        guard let type = message["type"] as? String else {
+            return
+        }
+
+        switch type {
+        case WatchMessageType.workoutCompleted.rawValue:
+            NotificationCenter.default.post(name: .workoutControl, object: message)
+        case WatchMessageType.workoutStarted.rawValue:
+            NotificationCenter.default.post(name: .workoutControl, object: message)
+        case WatchMessageType.workoutStart.rawValue:
+            NotificationCenter.default.post(name: .workoutControl, object: message)
+        case WatchMessageType.requestMusicSuggestion.rawValue:
+            NotificationCenter.default.post(name: .requestMusicSuggestion, object: message)
+        case WatchMessageType.playbackControl.rawValue:
+            NotificationCenter.default.post(name: .playbackControl, object: message)
+        case "musicControl":
+            NotificationCenter.default.post(name: .playbackControl, object: message)
+        case "workoutControl":
+            NotificationCenter.default.post(name: .workoutControl, object: message)
+        case WatchMessageType.workoutHeartRate.rawValue:
+            NotificationCenter.default.post(name: .workoutHeartRate, object: message)
+        case "segment_changed":
+            NotificationCenter.default.post(name: .segmentChanged, object: message)
+        case WatchMessageType.workoutUpdate.rawValue, "workout_update":
+            NotificationCenter.default.post(name: .workoutUpdate, object: message)
+        default:
+            break
         }
     }
 }
@@ -252,29 +240,22 @@ final class WatchConnectivityWrapper: ObservableObject {
     @Published var isWatchPaired = false
     @Published var lastError: Error?
     
-    private init() {
-        print("⚠️ Running on iOS Simulator - WatchConnectivity not available")
-    }
-    
+    private init() {}
+
     func sendRunPlan(_ segments: [RunSegment]) {
-        print("⚠️ WatchConnectivity not available on simulator")
         lastError = WatchConnectivityError.notSupported
     }
-    
+
     func requestStartRun() {
-        print("⚠️ WatchConnectivity not available on simulator")
         lastError = WatchConnectivityError.notSupported
     }
-    
+
     func sendMessage(_ message: [String: Any], errorHandler: @escaping (Error) -> Void) {
-        print("⚠️ WatchConnectivity not available on simulator")
         errorHandler(WatchConnectivityError.notSupported)
     }
-    
+
     func sendMessageWithFallback(_ message: [String: Any], errorHandler: @escaping (Error) -> Void) {
-        print("⚠️ WatchConnectivity not available on simulator")
         errorHandler(WatchConnectivityError.notSupported)
     }
 }
 #endif
-

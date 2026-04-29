@@ -71,10 +71,26 @@ struct MusicGenre: Codable, Identifiable, Equatable {
     }
 }
 
+struct ImportedPlaylist: Codable, Identifiable, Equatable, Hashable {
+    let id: String
+    let name: String
+    let songCount: Int
+
+    init(id: String, name: String, songCount: Int) {
+        self.id = id
+        self.name = name
+        self.songCount = songCount
+    }
+}
+
 struct MusicPreferences: Codable, Equatable {
     var favoriteArtists: [MusicArtist]
     var favoriteSongs: [MusicSong]
     var favoriteGenres: [MusicGenre]
+    var selectedPlaylist: ImportedPlaylist?
+    var importedPlaylistArtists: [MusicArtist]
+    var importedPlaylistSongs: [MusicSong]
+    var importedPlaylistGenres: [MusicGenre]
     var preferredMoodForIntensity: [Intensity: MusicMood]
     var autoPlayEnabled: Bool
     var crossfadeDuration: TimeInterval
@@ -84,14 +100,22 @@ struct MusicPreferences: Codable, Equatable {
         favoriteArtists: [MusicArtist] = [],
         favoriteSongs: [MusicSong] = [],
         favoriteGenres: [MusicGenre] = [],
+        selectedPlaylist: ImportedPlaylist? = nil,
+        importedPlaylistArtists: [MusicArtist] = [],
+        importedPlaylistSongs: [MusicSong] = [],
+        importedPlaylistGenres: [MusicGenre] = [],
         preferredMoodForIntensity: [Intensity: MusicMood] = [:],
         autoPlayEnabled: Bool = true,
-        crossfadeDuration: TimeInterval = 5.0,
+        crossfadeDuration: TimeInterval = 4.0,
         volumeBoost: Double = 0.0
     ) {
         self.favoriteArtists = favoriteArtists
         self.favoriteSongs = favoriteSongs
         self.favoriteGenres = favoriteGenres
+        self.selectedPlaylist = selectedPlaylist
+        self.importedPlaylistArtists = importedPlaylistArtists
+        self.importedPlaylistSongs = importedPlaylistSongs
+        self.importedPlaylistGenres = importedPlaylistGenres
         self.preferredMoodForIntensity = preferredMoodForIntensity
         self.autoPlayEnabled = autoPlayEnabled
         self.crossfadeDuration = crossfadeDuration
@@ -104,22 +128,79 @@ struct MusicPreferences: Codable, Equatable {
             self.preferredMoodForIntensity[.hard] = .intense
         }
     }
+
+    var allFavoriteArtists: [MusicArtist] {
+        deduplicatedByID(favoriteArtists + importedPlaylistArtists)
+    }
+
+    var allFavoriteSongs: [MusicSong] {
+        deduplicatedByID(favoriteSongs + importedPlaylistSongs)
+    }
+
+    var allFavoriteGenres: [MusicGenre] {
+        mergedGenres(favoriteGenres + importedPlaylistGenres)
+    }
+
+    var hasImportedPlaylistContent: Bool {
+        selectedPlaylist != nil && (!importedPlaylistSongs.isEmpty || !importedPlaylistArtists.isEmpty || !importedPlaylistGenres.isEmpty)
+    }
+
+    private func deduplicatedByID<T: Identifiable>(_ items: [T]) -> [T] where T.ID: Hashable {
+        var seen = Set<T.ID>()
+        var result: [T] = []
+
+        for item in items {
+            if seen.insert(item.id).inserted {
+                result.append(item)
+            }
+        }
+
+        return result
+    }
+
+    private func mergedGenres(_ genres: [MusicGenre]) -> [MusicGenre] {
+        var indexByID: [String: Int] = [:]
+        var result: [MusicGenre] = []
+
+        for genre in genres {
+            if let existingIndex = indexByID[genre.id] {
+                let existing = result[existingIndex]
+                result[existingIndex] = MusicGenre(
+                    id: existing.id,
+                    name: existing.name,
+                    isSelected: existing.isSelected || genre.isSelected
+                )
+            } else {
+                indexByID[genre.id] = result.count
+                result.append(genre)
+            }
+        }
+
+        return result
+    }
 }
 
 struct MusicContext: Codable {
     let currentHeartRate: Int?
+    let guidanceHeartRate: Int?
     let targetHeartRate: Int?
+    let heartRateTrend: HeartRateTrend
+    let hasStableHeartRateSignal: Bool
     let currentIntensity: Intensity
     let timeRemainingInSegment: TimeInterval
     let currentSongEndingIn: TimeInterval?
     let userPreferences: MusicPreferences
     let recentSongs: [MusicSong]
     let currentDistance: Double?
-    let currentPace: Double? // meters per second
+    let currentPace: Double? // km/h
     let isActive: Bool // whether user is actually moving/exercising
+
+    var effectiveHeartRate: Int? {
+        guidanceHeartRate ?? currentHeartRate
+    }
     
     var heartRateZone: HeartRateZone {
-        guard let current = currentHeartRate, let target = targetHeartRate else {
+        guard let current = effectiveHeartRate, let target = targetHeartRate else {
             return .unknown
         }
         
@@ -137,11 +218,11 @@ struct MusicContext: Codable {
     
     var actualWorkoutIntensity: WorkoutIntensity {
         // Determine actual workout intensity based on real-time data
-        if !isActive || (currentDistance ?? 0) < 10 {
+        if !isActive || (currentDistance ?? 0) < 0.01 {
             return .resting
         }
         
-        guard let heartRate = currentHeartRate else {
+        guard let heartRate = effectiveHeartRate else {
             return .unknown
         }
         
@@ -159,6 +240,10 @@ struct MusicContext: Codable {
     }
     
     var shouldAdjustMusic: Bool {
+        guard hasStableHeartRateSignal else {
+            return false
+        }
+
         // Should we adjust music based on actual vs planned intensity?
         switch (currentIntensity, actualWorkoutIntensity) {
         case (.easy, .vigorous), (.easy, .maximum):
@@ -173,7 +258,108 @@ struct MusicContext: Codable {
     }
 }
 
+struct MusicPromptSection: Identifiable, Equatable {
+    let id: String
+    let title: String
+    let body: String
+
+    init(title: String, body: String) {
+        self.id = title
+        self.title = title
+        self.body = body
+    }
+}
+
+struct MusicPromptPreview: Equatable {
+    let promptTitle: String
+    let sections: [MusicPromptSection]
+    let fullPrompt: String
+}
+
 // MARK: - Enums
+
+enum WorkoutPhase: String, CaseIterable, Identifiable, Codable, Hashable {
+    case starting
+    case midway
+    case finishing
+    case interval
+    case recovery
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .starting:
+            return "Starting"
+        case .midway:
+            return "Midway"
+        case .finishing:
+            return "Finishing"
+        case .interval:
+            return "Interval"
+        case .recovery:
+            return "Recovery"
+        }
+    }
+
+    var description: String {
+        switch self {
+        case .starting:
+            return "Beginning of the run"
+        case .midway:
+            return "Settled into the middle of the workout"
+        case .finishing:
+            return "Closing stretch of the run"
+        case .interval:
+            return "Switching into a harder interval"
+        case .recovery:
+            return "Backing off into recovery"
+        }
+    }
+}
+
+enum PromptLabSourceMode: String, CaseIterable, Identifiable, Hashable {
+    case allowCatalog
+    case preferLibrary
+    case libraryOnly
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .allowCatalog:
+            return "Allow Apple Music"
+        case .preferLibrary:
+            return "Prefer Library"
+        case .libraryOnly:
+            return "Library Only"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .allowCatalog:
+            return "Use library or Apple Music catalog"
+        case .preferLibrary:
+            return "Lean on saved songs first"
+        case .libraryOnly:
+            return "Force a locally playable pick"
+        }
+    }
+
+    var prefersLibrary: Bool {
+        switch self {
+        case .allowCatalog:
+            return false
+        case .preferLibrary, .libraryOnly:
+            return true
+        }
+    }
+
+    var requiresLibraryOnly: Bool {
+        self == .libraryOnly
+    }
+}
 
 enum WorkoutIntensity: String, CaseIterable, Codable {
     case resting = "resting"
@@ -259,6 +445,77 @@ enum MusicMood: String, CaseIterable, Codable {
         case .calming: return "blue"
         case .upbeat: return "yellow"
         }
+    }
+}
+
+// MARK: - Music Suggestion Models
+
+struct MusicSuggestion: Codable, Identifiable {
+    let id: UUID
+    let songTitle: String
+    let artist: String
+    let reason: String
+    let mood: MusicMood
+    let confidence: Double // 0.0 to 1.0
+
+    init(songTitle: String, artist: String, reason: String, mood: MusicMood, confidence: Double = 0.8) {
+        self.id = UUID()
+        self.songTitle = songTitle
+        self.artist = artist
+        self.reason = reason
+        self.mood = mood
+        self.confidence = confidence
+    }
+
+    /// Returns a copy with the artist name stripped from the song title.
+    /// The AI often returns titles like "As It Was by Harry Styles" instead of just "As It Was".
+    func cleanedTitle() -> MusicSuggestion {
+        var title = songTitle
+
+        // Remove trailing " by Artist" (case-insensitive)
+        if let range = title.range(of: " by \(artist)", options: [.caseInsensitive, .backwards]) {
+            title = String(title[..<range.lowerBound])
+        }
+
+        // Also try " - Artist" pattern
+        if let range = title.range(of: " - \(artist)", options: [.caseInsensitive, .backwards]) {
+            title = String(title[..<range.lowerBound])
+        }
+
+        let cleaned = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard cleaned != songTitle else { return self }
+
+        return MusicSuggestion(songTitle: cleaned, artist: artist, reason: reason, mood: mood, confidence: confidence)
+    }
+
+    var sessionSongKey: String {
+        let cleaned = cleanedTitle()
+        return "\(cleaned.artist.normalizedMusicIdentity)|\(cleaned.songTitle.normalizedMusicIdentity)"
+    }
+}
+
+extension MusicSong {
+    var sessionSongKey: String {
+        "\(artist.normalizedMusicIdentity)|\(title.normalizedMusicIdentity)"
+    }
+}
+
+extension String {
+    var normalizedMusicIdentity: String {
+        var value = folding(options: [.diacriticInsensitive], locale: .current).lowercased()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        value = value.replacingOccurrences(of: #"\s*\([^\)]*\)"#, with: "", options: .regularExpression)
+        value = value.replacingOccurrences(of: #"\s*\[[^\]]*\]"#, with: "", options: .regularExpression)
+        value = value.replacingOccurrences(
+            of: #"\s*-\s*(remaster(ed)?(\s*\d{4})?|live|radio edit|single version|album version|explicit|clean)"#,
+            with: "",
+            options: .regularExpression
+        )
+        value = value.replacingOccurrences(of: #"[^a-z0-9]+"#, with: " ", options: .regularExpression)
+        value = value.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+
+        return value.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 

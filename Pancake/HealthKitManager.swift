@@ -1,6 +1,5 @@
 import Foundation
 import HealthKit
-import Observation
 
 @MainActor
 final class HealthKitManager: ObservableObject {
@@ -10,6 +9,7 @@ final class HealthKitManager: ObservableObject {
 
     @Published var isAuthorized: Bool = false
     @Published var lastAuthorizationError: Error?
+    @Published private(set) var missingRequiredShareTypeNames: [String] = []
     
     // MARK: - HealthKit Types
     private let readTypes: Set<HKObjectType>
@@ -52,18 +52,18 @@ final class HealthKitManager: ObservableObject {
 
     func requestAuthorization() {
         guard HKHealthStore.isHealthDataAvailable() else {
+            self.isAuthorized = false
+            self.missingRequiredShareTypeNames = []
             self.lastAuthorizationError = HealthKitError.notAvailable
             return
         }
 
         healthStore.requestAuthorization(toShare: shareTypes, read: readTypes) { [weak self] success, error in
             Task { @MainActor in
+                self?.updateAuthorizationState(requestSucceeded: success)
                 if let error = error {
                     self?.lastAuthorizationError = error
-                } else {
-                    self?.lastAuthorizationError = nil
                 }
-                self?.isAuthorized = success && self?.hasAnyAuthorizationGranted() == true
             }
         }
     }
@@ -71,34 +71,57 @@ final class HealthKitManager: ObservableObject {
     func refreshAuthorizationState() async {
         guard HKHealthStore.isHealthDataAvailable() else {
             self.isAuthorized = false
+            self.missingRequiredShareTypeNames = []
             self.lastAuthorizationError = HealthKitError.notAvailable
             return
         }
 
-        self.isAuthorized = hasAnyAuthorizationGranted()
-        if !isAuthorized {
-            self.lastAuthorizationError = HealthKitError.notAuthorized
-        } else {
-            self.lastAuthorizationError = nil
-        }
+        updateAuthorizationState()
     }
     
     // MARK: - Authorization Helpers
-    
-    private func hasAnyAuthorizationGranted() -> Bool {
-        // Check if we have authorization for any of our required types
-        for type in readTypes {
-            let status = healthStore.authorizationStatus(for: type)
-            if status == .sharingAuthorized { return true }
+
+    private func updateAuthorizationState(requestSucceeded: Bool? = nil) {
+        missingRequiredShareTypeNames = missingRequiredShareTypes().map(displayName(for:)).sorted()
+        isAuthorized = missingRequiredShareTypeNames.isEmpty
+
+        if isAuthorized {
+            lastAuthorizationError = nil
+        } else if !missingRequiredShareTypeNames.isEmpty {
+            lastAuthorizationError = HealthKitError.missingRequiredShareTypes(missingRequiredShareTypeNames)
+        } else if requestSucceeded == false {
+            lastAuthorizationError = HealthKitError.requestFailed
+        } else {
+            lastAuthorizationError = HealthKitError.notAuthorized
         }
-        for type in shareTypes {
-            let status = healthStore.authorizationStatus(for: type)
-            if status == .sharingAuthorized { return true }
+    }
+
+    private func missingRequiredShareTypes() -> [HKSampleType] {
+        // authorizationStatus(for:) only returns meaningful results for share (write) types.
+        // For read types, HealthKit always returns .notDetermined for privacy reasons.
+        // Pancake relies on writing workouts, distance, and energy, so every share type is required.
+        shareTypes.filter { healthStore.authorizationStatus(for: $0) != .sharingAuthorized }
+    }
+
+    private func displayName(for type: HKObjectType) -> String {
+        if type.identifier == HKObjectType.workoutType().identifier {
+            return "Workouts"
         }
-        return false
+
+        switch type.identifier {
+        case HKQuantityTypeIdentifier.distanceWalkingRunning.rawValue:
+            return "Walking + Running Distance"
+        case HKQuantityTypeIdentifier.activeEnergyBurned.rawValue:
+            return "Active Energy"
+        case HKQuantityTypeIdentifier.heartRate.rawValue:
+            return "Heart Rate"
+        default:
+            return type.identifier
+        }
     }
     
-    /// Check if we have authorization for a specific type
+    /// Check if we have share authorization for a specific type.
+    /// HealthKit intentionally does not expose read authorization status.
     func isAuthorized(for type: HKObjectType) -> Bool {
         return healthStore.authorizationStatus(for: type) == .sharingAuthorized
     }
@@ -205,7 +228,6 @@ final class HealthKitManager: ObservableObject {
         let workouts = try await fetchRunningWorkouts()
         let runEvents = workouts.map { convertWorkoutToRunEvent($0) }
         
-        print("📊 Imported \(runEvents.count) running workouts from HealthKit (minimum 0.5km)")
         return runEvents
     }
 }
@@ -214,6 +236,7 @@ final class HealthKitManager: ObservableObject {
 enum HealthKitError: LocalizedError {
     case notAvailable
     case notAuthorized
+    case missingRequiredShareTypes([String])
     case requestFailed
     
     var errorDescription: String? {
@@ -222,6 +245,8 @@ enum HealthKitError: LocalizedError {
             return "Health data is not available on this device"
         case .notAuthorized:
             return "HealthKit authorization is required"
+        case .missingRequiredShareTypes(let names):
+            return "HealthKit needs write access for: \(names.joined(separator: ", "))"
         case .requestFailed:
             return "Failed to request HealthKit authorization"
         }

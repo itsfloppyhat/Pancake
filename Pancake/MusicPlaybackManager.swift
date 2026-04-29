@@ -16,66 +16,266 @@ final class MusicPlaybackManager: ObservableObject {
     @Published var isGeneratingSuggestion = false
     @Published var lastSuggestion: MusicSuggestion?
     @Published var playbackError: Error?
-    
-    private let chatGPTService = ChatGPTService.shared
+    @Published var playbackStateDescription = "stopped"
+
+    /// When true, WorkoutMusicCoordinator is driving song generation.
+    /// The playback manager will NOT auto-generate songs on playback end / now-playing change.
+    /// Only the crossfade timer will still trigger generation as a safety net.
+    var coordinatorDriven = false
+
+    private let aiService = MusicAIService.shared
     private let profileManager = UserProfileManager.shared
+    /// Single player for both library and Apple Music so state and observers stay in sync
     private var musicPlayer: MPMusicPlayerController
     private var playbackTimer: Timer?
     private var suggestionTimer: Timer?
     private var currentWorkoutContext: WorkoutContext?
     private var lastSuggestionTime: Date = Date.distantPast
+    private var hasConfiguredPlaybackAudioSession = false
+    /// Track last song ID to suppress duplicate nowPlayingItemChanged notifications
+    private var lastReportedSongID: String?
     
-    // MARK: - Apple Music Integration
-    
-    func playAppleMusicSuggestion(_ suggestion: MusicSuggestion) async {
-        print("🎵 Attempting to play Apple Music suggestion: '\(suggestion.songTitle)' by \(suggestion.artist)")
-        
-        // First try to find the exact song in Apple Music
-        do {
-            let songs = try await MusicKitService.shared.searchSongs(query: "\(suggestion.songTitle) \(suggestion.artist)", limit: 10)
-            
-            if let exactMatch = songs.first(where: { song in
-                let normalizedTitle = normalize(song.title)
-                let normalizedArtist = normalize(song.artistName)
-                let normalizedSuggestionTitle = normalize(suggestion.songTitle)
-                let normalizedSuggestionArtist = normalize(suggestion.artist)
-                
-                return normalizedTitle == normalizedSuggestionTitle && normalizedArtist == normalizedSuggestionArtist
-            }) {
-                print("🎯 Found exact Apple Music match: '\(exactMatch.title)' by \(exactMatch.artistName)")
-                try await MusicKitService.shared.playSong(exactMatch)
-                return
+    /// Crossfade: start next song this many seconds before current ends (avoids gap; no true overlap with system player)
+    private var crossfadeDuration: TimeInterval { profileManager.userProfile.musicPreferences.crossfadeDuration }
+
+    var hasLibraryAccess: Bool {
+        MPMediaLibrary.authorizationStatus() == .authorized
+    }
+
+    var hasCatalogAccess: Bool {
+        MusicKitService.shared.isAuthorized
+    }
+
+    var hasAvailablePlaybackSource: Bool {
+        hasLibraryAccess || hasCatalogAccess
+    }
+
+    @discardableResult
+    func playEmergencyFallback(
+        preferences: MusicPreferences,
+        intensity: Intensity,
+        avoiding avoidedSongKeys: Set<String>
+    ) async -> MusicSuggestion? {
+        if hasLibraryAccess, let fallbackItem = bestLibraryFallbackItem(
+            preferences: preferences,
+            avoiding: avoidedSongKeys
+        ) {
+            let suggestion = MusicSuggestion(
+                songTitle: fallbackItem.title ?? "Unknown",
+                artist: fallbackItem.artist ?? "Unknown",
+                reason: "Using a reliable song from the runner's library to keep the workout moving after a generated suggestion missed.",
+                mood: MusicRecommendationPolicy.defaultMood(for: intensity),
+                confidence: 0.58
+            )
+
+            if await playSong(fallbackItem) {
+                lastSuggestion = suggestion
+                return suggestion
             }
-            
-            // Try to find a close match
-            if let closeMatch = songs.first {
-                print("🎯 Found close Apple Music match: '\(closeMatch.title)' by \(closeMatch.artistName)")
-                try await MusicKitService.shared.playSong(closeMatch)
-                return
-            }
-            
-            print("❌ No Apple Music matches found for '\(suggestion.songTitle)' by \(suggestion.artist)")
-            playbackError = MusicError.searchFailed
-            
-        } catch {
-            print("❌ Apple Music search error: \(error)")
-            playbackError = error
         }
+
+        guard hasCatalogAccess else {
+            return nil
+        }
+
+        let fallbackSuggestion = aiService.fallbackSuggestion(
+            preferences: preferences,
+            intensity: intensity,
+            avoiding: avoidedSongKeys
+        ).cleanedTitle()
+
+        guard !avoidedSongKeys.contains(fallbackSuggestion.sessionSongKey) else {
+            return nil
+        }
+
+        if await playAppleMusicSuggestion(fallbackSuggestion) {
+            lastSuggestion = fallbackSuggestion
+            return fallbackSuggestion
+        }
+
+        return nil
+    }
+    
+    // MARK: - Apple Music Integration (catalog playback when not in library)
+    
+    @discardableResult
+    func playAppleMusicSuggestion(_ suggestion: MusicSuggestion) async -> Bool {
+        configureAudioSession()
+
+        guard hasCatalogAccess else {
+            updatePlaybackFailure(MusicError.catalogAccessRequired, state: "enable Apple Music playback")
+            return false
+        }
+
+        do {
+            let songs = try await fetchCatalogCandidates(for: suggestion)
+
+            guard let bestMatch = bestCatalogMatch(in: songs, for: suggestion) else {
+                updatePlaybackFailure(MusicError.songUnavailable, state: "song unavailable")
+                return false
+            }
+
+            try await MusicKitService.shared.playSong(bestMatch)
+            applyAppleMusicNowPlaying(suggestion: suggestion, duration: bestMatch.duration)
+            clearPlaybackFailure()
+            return true
+        } catch {
+            print("❌ Apple Music search/playback error: \(error)")
+            updatePlaybackFailure(error, state: "apple music playback failed")
+            return false
+        }
+    }
+    
+    /// Keep UI in sync after Apple Music starts (same player is observed, but initial state may lag)
+    private func applyAppleMusicNowPlaying(suggestion: MusicSuggestion, duration: TimeInterval?) {
+        currentSong = MusicSong(
+            id: suggestion.id.uuidString,
+            title: suggestion.songTitle,
+            artist: suggestion.artist,
+            album: nil,
+            artwork: nil,
+            duration: duration ?? 0
+        )
+        currentSongDuration = duration ?? 0
+        currentPlaybackTime = 0
+        isPlaying = true
+        playbackStateDescription = "playing"
+        playbackError = nil
+        startPlaybackTimer()
+    }
+
+    private func fetchCatalogCandidates(for suggestion: MusicSuggestion) async throws -> [Song] {
+        let primaryQuery = "\(suggestion.songTitle) \(suggestion.artist)"
+        let primaryResults = try await MusicKitService.shared.searchSongs(query: primaryQuery, limit: 10)
+        if bestCatalogMatch(in: primaryResults, for: suggestion) != nil {
+            return primaryResults
+        }
+
+        var seenSongIDs = Set<String>()
+        var combinedResults: [Song] = []
+
+        for song in primaryResults {
+            let storeID = song.id.rawValue
+            if seenSongIDs.insert(storeID).inserted {
+                combinedResults.append(song)
+            }
+        }
+
+        let searchQueries = [
+            suggestion.songTitle,
+            "\(suggestion.artist) \(suggestion.songTitle)"
+        ]
+
+        for query in searchQueries {
+            let songs = try await MusicKitService.shared.searchSongs(query: query, limit: 10)
+
+            for song in songs {
+                let storeID = song.id.rawValue
+                if seenSongIDs.insert(storeID).inserted {
+                    combinedResults.append(song)
+                }
+            }
+        }
+
+        return combinedResults
+    }
+
+    private func clearPlaybackFailure() {
+        playbackError = nil
+        if !isPlaying {
+            playbackStateDescription = "stopped"
+        }
+    }
+
+    private func updatePlaybackFailure(_ error: Error, state: String) {
+        playbackError = error
+        playbackStateDescription = state
+        isPlaying = musicPlayer.playbackState == .playing
+    }
+
+    private func bestLibraryFallbackItem(
+        preferences: MusicPreferences,
+        avoiding avoidedSongKeys: Set<String>
+    ) -> MPMediaItem? {
+        guard let items = MPMediaQuery.songs().items, !items.isEmpty else {
+            return nil
+        }
+
+        let favoriteSongKeys = Set(preferences.allFavoriteSongs.map(\.sessionSongKey))
+        let favoriteArtists = Set(preferences.favoriteArtists.map { $0.name.normalizedMusicIdentity })
+        let importedArtists = Set(preferences.importedPlaylistArtists.map { $0.name.normalizedMusicIdentity })
+        let selectedGenres = Set(
+            preferences.allFavoriteGenres
+                .filter(\.isSelected)
+                .map { $0.name.normalizedMusicIdentity }
+        )
+
+        let scoredItems = items.compactMap { item -> (item: MPMediaItem, score: Int)? in
+            guard let title = item.title, let artist = item.artist else {
+                return nil
+            }
+
+            let songKey = "\(artist.normalizedMusicIdentity)|\(title.normalizedMusicIdentity)"
+            guard !avoidedSongKeys.contains(songKey) else {
+                return nil
+            }
+
+            var score = 0
+
+            if favoriteSongKeys.contains(songKey) {
+                score += 300
+            }
+
+            let normalizedArtist = artist.normalizedMusicIdentity
+            if favoriteArtists.contains(normalizedArtist) {
+                score += 180
+            }
+            if importedArtists.contains(normalizedArtist) {
+                score += 120
+            }
+
+            if let genre = item.genre?.normalizedMusicIdentity, selectedGenres.contains(genre) {
+                score += 90
+            }
+
+            score += min(item.playCount, 40)
+
+            if item.playbackDuration >= 90, item.playbackDuration <= 480 {
+                score += 10
+            }
+
+            return (item, score)
+        }
+
+        let sortedItems = scoredItems.sorted { lhs, rhs in
+            if lhs.score == rhs.score {
+                return lhs.item.playCount > rhs.item.playCount
+            }
+            return lhs.score > rhs.score
+        }
+
+        if let topScore = sortedItems.first?.score, topScore > 0 {
+            let strongestMatches = sortedItems
+                .prefix { $0.score == topScore }
+                .map(\.item)
+
+            return strongestMatches.randomElement() ?? sortedItems.first?.item
+        }
+
+        let anyAvailableSongs = items.filter { item in
+            guard let title = item.title, let artist = item.artist else {
+                return false
+            }
+            let songKey = "\(artist.normalizedMusicIdentity)|\(title.normalizedMusicIdentity)"
+            return !avoidedSongKeys.contains(songKey)
+        }
+
+        return anyAvailableSongs.randomElement()
     }
     
     // MARK: - Matching Helpers
     private func normalize(_ text: String) -> String {
-        // Lowercase, trim, remove punctuation
-        var s = text.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
-        // Remove common parentheticals like (feat. ...), (live), (remastered 2011), [radio edit]
-        // Remove anything in parentheses or brackets
-        s = s.replacingOccurrences(of: #"\s*\([^\)]*\)"#, with: "", options: .regularExpression)
-        s = s.replacingOccurrences(of: #"\s*\[[^\]]*\]"#, with: "", options: .regularExpression)
-        // Remove common hyphen suffixes like "- remastered", "- live"
-        s = s.replacingOccurrences(of: #"\s*-\s*(remaster(ed)?(\s*\d{4})?|live|radio edit|single version)"#, with: "", options: .regularExpression)
-        // Collapse multiple spaces
-        s = s.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
-        return s
+        text.normalizedMusicIdentity
     }
 
     private func scoreMatch(itemTitle: String, itemArtist: String, sugTitle: String, sugArtist: String) -> Int {
@@ -95,12 +295,44 @@ final class MusicPlaybackManager: ObservableObject {
         // Require reasonably strong match
         return score >= 5
     }
+
+    private func bestCatalogMatch(in songs: [Song], for suggestion: MusicSuggestion) -> Song? {
+        let exactMatch = songs.first { song in
+            normalize(song.title) == normalize(suggestion.songTitle) &&
+            normalize(song.artistName) == normalize(suggestion.artist)
+        }
+        if let exactMatch = exactMatch {
+            return exactMatch
+        }
+
+        var bestSong: Song?
+        var bestScore = 0
+
+        for song in songs {
+            let score = scoreMatch(
+                itemTitle: song.title,
+                itemArtist: song.artistName,
+                sugTitle: suggestion.songTitle,
+                sugArtist: suggestion.artist
+            )
+
+            if score > bestScore {
+                bestScore = score
+                bestSong = song
+            }
+        }
+
+        guard let bestSong, isGoodEnough(score: bestScore) else {
+            return nil
+        }
+
+        return bestSong
+    }
     
     private init() {
-        musicPlayer = MPMusicPlayerController.systemMusicPlayer
+        // Use applicationQueuePlayer for both library and Apple Music so one observer sees all playback
+        musicPlayer = MPMusicPlayerController.applicationQueuePlayer
         setupMusicPlayer()
-        
-        // Additional setup for better reliability
         musicPlayer.repeatMode = .none
         musicPlayer.shuffleMode = .off
     }
@@ -132,21 +364,34 @@ final class MusicPlaybackManager: ObservableObject {
             object: musicPlayer
         )
     }
+
+    private func configureAudioSession() {
+        do {
+            let session = AVAudioSession.sharedInstance()
+            if !hasConfiguredPlaybackAudioSession || session.category != .playback {
+                try session.setCategory(.playback, mode: .default)
+            }
+            try session.setActive(true)
+            hasConfiguredPlaybackAudioSession = true
+        } catch {
+            hasConfiguredPlaybackAudioSession = false
+            print("Failed to configure playback audio session: \(error)")
+        }
+    }
     
     // MARK: - Workout Integration
     
     func startWorkoutMusic(workoutContext: WorkoutContext) {
-        print("🎵 MusicPlaybackManager.startWorkoutMusic called")
+        configureAudioSession()
         currentWorkoutContext = workoutContext
-        
-        // Start with initial song suggestion
-        print("🎵 Starting initial song generation...")
-        Task {
-            await generateAndPlayStartingSong()
-        }
-        
-        // Set up suggestion timer for interval changes
-        print("⏰ Starting suggestion timer...")
+        clearPlaybackFailure()
+
+        // NOTE: Do NOT generate the initial song here.
+        // WorkoutMusicCoordinator.startWorkoutMusic() calls generateStartingSong()
+        // and then feeds the result back via playSuggestedSong(). Generating here too
+        // would race for the AI generation lock and one request would be skipped.
+
+        // Set up suggestion timer for crossfade/end-of-song transitions
         startSuggestionTimer()
     }
     
@@ -154,7 +399,12 @@ final class MusicPlaybackManager: ObservableObject {
         musicPlayer.stop()
         isPlaying = false
         currentSong = nil
+        currentSongDuration = 0
+        currentPlaybackTime = 0
+        playbackStateDescription = "stopped"
+        playbackError = nil
         currentWorkoutContext = nil
+        lastReportedSongID = nil
         
         stopSuggestionTimer()
         stopPlaybackTimer()
@@ -168,128 +418,130 @@ final class MusicPlaybackManager: ObservableObject {
     
     private func generateAndPlayStartingSong() async {
         guard let context = currentWorkoutContext else { return }
-        
+
         isGeneratingSuggestion = true
-        
+
         do {
-            let suggestion = try await chatGPTService.generateStartingSongSuggestion(
+            let suggestion = try await aiService.generateStartingSongSuggestion(
                 workoutPlan: context.segments,
                 userPreferences: profileManager.userProfile.musicPreferences,
-                currentIntensity: context.currentSegment.intensity
+                currentIntensity: context.currentSegment.intensity,
+                mustUseLibrary: hasLibraryAccess && !hasCatalogAccess
             )
-            
+
             await playSuggestedSong(suggestion)
-            
+
         } catch {
             playbackError = error
             print("Failed to generate starting song: \(error)")
         }
-        
+
         isGeneratingSuggestion = false
     }
     
     func generateNextSongSuggestion() async {
-        guard let context = currentWorkoutContext else { 
-            print("❌ No workout context for next song generation")
-            return 
+        guard let context = currentWorkoutContext else {
+            return
         }
-        
-        print("🎵 Generating next song suggestion...")
+
         isGeneratingSuggestion = true
-        
+
         do {
-            let suggestion = try await chatGPTService.generateIntervalChangeSuggestion(
+            let suggestion = try await aiService.generateIntervalChangeSuggestion(
                 context: context.musicContext,
                 userPreferences: profileManager.userProfile.musicPreferences,
                 currentDistance: context.totalDistance,
                 currentTime: context.totalTime,
-                upcomingIntensity: context.upcomingSegment?.intensity
+                upcomingIntensity: context.upcomingSegment?.intensity,
+                mustUseLibrary: hasLibraryAccess && !hasCatalogAccess
             )
-            
-            print("🤖 Generated next song: '\(suggestion.songTitle)' by \(suggestion.artist)")
+
             await playSuggestedSong(suggestion)
-            
+
         } catch {
             playbackError = error
             print("❌ Failed to generate next song: \(error)")
         }
-        
+
         isGeneratingSuggestion = false
     }
     
-    func playSuggestedSong(_ suggestion: MusicSuggestion) async {
-        lastSuggestion = suggestion
-        
-        print("🎵 Attempting to play suggested song: '\(suggestion.songTitle)' by \(suggestion.artist)")
-        
-        // Check music authorization first
-        let authStatus = MPMediaLibrary.authorizationStatus()
-        print("🔐 Music authorization status: \(authStatus.rawValue)")
-        
-        guard authStatus == .authorized else {
-            print("❌ Music not authorized. Status: \(authStatus.rawValue)")
-            playbackError = MusicError.notAuthorized
-            return
+    @discardableResult
+    func playSuggestedSong(_ suggestion: MusicSuggestion) async -> Bool {
+        // Clean up the song title — the AI sometimes appends "by Artist" to the title
+        let cleanedSuggestion = suggestion.cleanedTitle()
+        lastSuggestion = cleanedSuggestion
+
+        if hasLibraryAccess {
+            let foundInLibrary = await tryPlayFromLibrary(suggestion: cleanedSuggestion)
+            if foundInLibrary {
+                return true
+            }
         }
-        
-        // Search for the song in Apple Music with multiple strategies
-        let query = MPMediaQuery.songs()
-        
-        // First try exact title match
-        let exactPredicate = MPMediaPropertyPredicate(
+
+        guard hasCatalogAccess else {
+            if hasLibraryAccess {
+                updatePlaybackFailure(MusicError.catalogAccessRequired, state: "enable Apple Music playback")
+            } else {
+                updatePlaybackFailure(MusicError.noPlayableMusicSource, state: "music access needed")
+            }
+            return false
+        }
+
+        // Not in library or library not authorized: play from Apple Music catalog
+        return await playAppleMusicSuggestion(cleanedSuggestion)
+    }
+    
+    /// Attempts to find and play the suggestion from the user's local library.
+    /// Returns `true` if the song was found and playback started, `false` otherwise.
+    @discardableResult
+    private func tryPlayFromLibrary(suggestion: MusicSuggestion) async -> Bool {
+        let titleQuery = MPMediaQuery.songs()
+        let titlePredicate = MPMediaPropertyPredicate(
             value: suggestion.songTitle,
             forProperty: MPMediaItemPropertyTitle,
             comparisonType: .contains
         )
-        query.addFilterPredicate(exactPredicate)
-        
-        if let items = query.items, !items.isEmpty {
-            print("✅ Found \(items.count) songs matching '\(suggestion.songTitle)'")
+        titleQuery.addFilterPredicate(titlePredicate)
+
+        if let items = titleQuery.items, !items.isEmpty {
             if let song = findBestSongMatch(items: items, suggestion: suggestion) {
-                print("🎯 Playing best match: '\(song.title ?? "Unknown")' by \(song.artist ?? "Unknown")")
-                await playSong(song)
-                return
-            } else {
-                print("❌ No good match from title query, trying artist query with local filtering...")
-                // Try artist query and then filter locally by title with scoring
-                let artistQuery = MPMediaQuery.songs()
-                let artistPredicate = MPMediaPropertyPredicate(
-                    value: suggestion.artist,
-                    forProperty: MPMediaItemPropertyArtist,
-                    comparisonType: .contains
+                return await playSong(song)
+            }
+        }
+
+        let artistQuery = MPMediaQuery.songs()
+        let artistPredicate = MPMediaPropertyPredicate(
+            value: suggestion.artist,
+            forProperty: MPMediaItemPropertyArtist,
+            comparisonType: .contains
+        )
+        artistQuery.addFilterPredicate(artistPredicate)
+
+        if let artistItems = artistQuery.items, !artistItems.isEmpty {
+            var bestItem: MPMediaItem?
+            var bestScore = 0
+
+            for item in artistItems {
+                guard let title = item.title, let artist = item.artist else { continue }
+                let score = scoreMatch(
+                    itemTitle: title,
+                    itemArtist: artist,
+                    sugTitle: suggestion.songTitle,
+                    sugArtist: suggestion.artist
                 )
-                artistQuery.addFilterPredicate(artistPredicate)
-                if let artistItems = artistQuery.items, !artistItems.isEmpty {
-                    print("✅ Found \(artistItems.count) items for artist '\(suggestion.artist)' - filtering by title...")
-                    // Score artist items by title/artist against suggestion
-                    var bestItem: MPMediaItem?
-                    var bestScore = 0
-                    for item in artistItems {
-                        guard let t = item.title, let a = item.artist else { continue }
-                        let s = scoreMatch(itemTitle: t, itemArtist: a, sugTitle: suggestion.songTitle, sugArtist: suggestion.artist)
-                        if s > bestScore {
-                            bestScore = s
-                            bestItem = item
-                        }
-                    }
-                    if let bestItem = bestItem, isGoodEnough(score: bestScore) {
-                        print("🎯 Playing best artist-filtered match: '\(bestItem.title ?? "Unknown")' by \(bestItem.artist ?? "Unknown") (score: \(bestScore))")
-                        await playSong(bestItem)
-                        return
-                    } else {
-                        print("❌ No good match after artist filtering (best score: \(bestScore)). Not playing unrelated song.")
-                    }
-                } else {
-                    print("❌ No items found for artist query either.")
+                if score > bestScore {
+                    bestScore = score
+                    bestItem = item
                 }
             }
-        } else {
-            print("❌ No songs found matching '\(suggestion.songTitle)' in title query.")
+
+            if let bestItem, isGoodEnough(score: bestScore) {
+                return await playSong(bestItem)
+            }
         }
-        
-        // At this point, we failed to find a good match. Report error instead of playing unrelated track.
-        self.playbackError = MusicError.searchFailed
-        return
+
+        return await tryFuzzySongSearch(suggestion)
     }
     
     private func findBestSongMatch(items: [MPMediaItem], suggestion: MusicSuggestion) -> MPMediaItem? {
@@ -319,117 +571,39 @@ final class MusicPlaybackManager: ObservableObject {
         return nil
     }
     
-    private func tryFuzzySongSearch(_ suggestion: MusicSuggestion) async {
-        print("🔍 Starting fuzzy search for '\(suggestion.songTitle)' by \(suggestion.artist)")
-        
+    private func tryFuzzySongSearch(_ suggestion: MusicSuggestion) async -> Bool {
         // Get all songs and search manually for better matching
         let allSongsQuery = MPMediaQuery.songs()
         guard let allSongs = allSongsQuery.items, !allSongs.isEmpty else {
-            print("❌ No songs in library for fuzzy search")
-            await playRandomSong()
-            return
+            return false
         }
-        
-        print("📚 Searching through \(allSongs.count) songs in library...")
-        
-        // Try different matching strategies
-        let matchingSongs = findFuzzyMatches(in: allSongs, for: suggestion)
-        
-        // Debug: Log top matches with scores
-        if !matchingSongs.isEmpty {
-            print("🔍 Top fuzzy matches found:")
-            let scoredMatches = findFuzzyMatchesWithScores(in: allSongs, for: suggestion)
-            for (index, match) in scoredMatches.prefix(5).enumerated() {
-                print("   \(index + 1). '\(match.item.title ?? "Unknown")' by \(match.item.artist ?? "Unknown") (score: \(match.score))")
-            }
+
+        let matchingSongs = findFuzzyMatchesWithScores(in: allSongs, for: suggestion)
+
+        guard let bestMatch = matchingSongs.first, isGoodEnough(score: bestMatch.score) else {
+            return false
         }
-        
-        if let bestMatch = matchingSongs.first {
-            print("🎯 Found fuzzy match: '\(bestMatch.title ?? "Unknown")' by \(bestMatch.artist ?? "Unknown")")
-            await playSong(bestMatch)
-        } else {
-            print("❌ No fuzzy matches found, trying artist search...")
-            await searchAndPlayByArtist(suggestion)
-        }
+
+        return await playSong(bestMatch.item)
     }
     
     private func findFuzzyMatches(in songs: [MPMediaItem], for suggestion: MusicSuggestion) -> [MPMediaItem] {
-        let targetTitle = suggestion.songTitle.lowercased()
-        let targetArtist = suggestion.artist.lowercased()
-        
-        var matches: [(item: MPMediaItem, score: Int)] = []
-        
-        for song in songs {
-            guard let title = song.title?.lowercased(),
-                  let artist = song.artist?.lowercased() else { continue }
-            
-            var score = 0
-            var hasArtistMatch = false
-            
-            // Artist matching (required for any match)
-            if artist == targetArtist {
-                score += 50
-                hasArtistMatch = true
-            } else if artist.contains(targetArtist) || targetArtist.contains(artist) {
-                score += 30
-                hasArtistMatch = true
-            }
-            
-            // Only proceed with title matching if we have an artist match
-            guard hasArtistMatch else { continue }
-            
-            // Exact title match (highest priority)
-            if title == targetTitle {
-                score += 100
-            }
-            // Title starts with target (high priority) - more strict than contains
-            else if title.hasPrefix(targetTitle) {
-                score += 80
-            }
-            // Target starts with title (medium priority)
-            else if targetTitle.hasPrefix(title) {
-                score += 60
-            }
-            // Word-by-word matching (more strict)
-            else {
-                let titleWords = title.components(separatedBy: CharacterSet.whitespaces.union(CharacterSet.punctuationCharacters)).filter { !$0.isEmpty }
-                let targetWords = targetTitle.components(separatedBy: CharacterSet.whitespaces.union(CharacterSet.punctuationCharacters)).filter { !$0.isEmpty }
-                
-                // Check if any target word exactly matches any title word
-                for targetWord in targetWords {
-                    for titleWord in titleWords {
-                        if titleWord == targetWord {
-                            score += 25
-                        } else if titleWord.hasPrefix(targetWord) || targetWord.hasPrefix(titleWord) {
-                            score += 15
-                        }
-                    }
-                }
-            }
-            
-            // Only include songs with both artist and title match
-            if score > 30 { // Must have at least artist match + some title match
-                matches.append((song, score))
-            }
-        }
-        
-        // Sort by score (highest first) and return items
-        return matches.sorted { $0.score > $1.score }.map { $0.item }
+        return findFuzzyMatchesWithScores(in: songs, for: suggestion).map { $0.item }
     }
-    
+
     private func findFuzzyMatchesWithScores(in songs: [MPMediaItem], for suggestion: MusicSuggestion) -> [(item: MPMediaItem, score: Int)] {
         let targetTitle = suggestion.songTitle.lowercased()
         let targetArtist = suggestion.artist.lowercased()
-        
+
         var matches: [(item: MPMediaItem, score: Int)] = []
-        
+
         for song in songs {
             guard let title = song.title?.lowercased(),
                   let artist = song.artist?.lowercased() else { continue }
-            
+
             var score = 0
             var hasArtistMatch = false
-            
+
             // Artist matching (required for any match)
             if artist == targetArtist {
                 score += 50
@@ -438,28 +612,20 @@ final class MusicPlaybackManager: ObservableObject {
                 score += 30
                 hasArtistMatch = true
             }
-            
-            // Only proceed with title matching if we have an artist match
+
             guard hasArtistMatch else { continue }
-            
-            // Exact title match (highest priority)
+
+            // Title matching
             if title == targetTitle {
                 score += 100
-            }
-            // Title starts with target (high priority) - more strict than contains
-            else if title.hasPrefix(targetTitle) {
+            } else if title.hasPrefix(targetTitle) {
                 score += 80
-            }
-            // Target starts with title (medium priority)
-            else if targetTitle.hasPrefix(title) {
+            } else if targetTitle.hasPrefix(title) {
                 score += 60
-            }
-            // Word-by-word matching (more strict)
-            else {
+            } else {
                 let titleWords = title.components(separatedBy: CharacterSet.whitespaces.union(CharacterSet.punctuationCharacters)).filter { !$0.isEmpty }
                 let targetWords = targetTitle.components(separatedBy: CharacterSet.whitespaces.union(CharacterSet.punctuationCharacters)).filter { !$0.isEmpty }
-                
-                // Check if any target word exactly matches any title word
+
                 for targetWord in targetWords {
                     for titleWord in titleWords {
                         if titleWord == targetWord {
@@ -470,19 +636,16 @@ final class MusicPlaybackManager: ObservableObject {
                     }
                 }
             }
-            
-            // Only include songs with both artist and title match
-            if score > 30 { // Must have at least artist match + some title match
+
+            if score > 30 {
                 matches.append((song, score))
             }
         }
-        
-        // Sort by score (highest first) and return with scores
+
         return matches.sorted { $0.score > $1.score }
     }
     
-    private func searchAndPlayByArtist(_ suggestion: MusicSuggestion) async {
-        print("🎤 Searching for artist: '\(suggestion.artist)'")
+    private func searchAndPlayByArtist(_ suggestion: MusicSuggestion) async -> Bool {
         
         let query = MPMediaQuery.songs()
         let predicate = MPMediaPropertyPredicate(
@@ -493,7 +656,6 @@ final class MusicPlaybackManager: ObservableObject {
         query.addFilterPredicate(predicate)
         
         if let items = query.items, !items.isEmpty {
-            print("✅ Found \(items.count) items for artist '\(suggestion.artist)'. Filtering by title...")
             // Filter with scoring
             var bestItem: MPMediaItem?
             var bestScore = 0
@@ -506,53 +668,43 @@ final class MusicPlaybackManager: ObservableObject {
                 }
             }
             if let bestItem = bestItem, isGoodEnough(score: bestScore) {
-                print("🎯 Playing best artist match: '\(bestItem.title ?? "Unknown")' by \(bestItem.artist ?? "Unknown") (score: \(bestScore))")
-                await playSong(bestItem)
+                return await playSong(bestItem)
             } else {
-                print("❌ No sufficiently good artist match (best score: \(bestScore)). Not playing unrelated song.")
-                playbackError = MusicError.searchFailed
+                updatePlaybackFailure(MusicError.songUnavailable, state: "song unavailable")
+                return false
             }
         } else {
-            print("❌ No items found for artist '\(suggestion.artist)'")
-            playbackError = MusicError.searchFailed
+            updatePlaybackFailure(MusicError.songUnavailable, state: "song unavailable")
+            return false
         }
     }
     
     private func playRandomSong() async {
-        print("🎲 Fallback: Playing random song from library (not used for AI suggestion mismatch)")
-        print("📚 Total songs in library: \(MPMediaQuery.songs().items?.count ?? 0)")
         
         if let allSongs = MPMediaQuery.songs().items, !allSongs.isEmpty {
             let randomSong = allSongs.randomElement()!
-            print("🎵 Selected random song: '\(randomSong.title ?? "Unknown")' by \(randomSong.artist ?? "Unknown")")
             await playSong(randomSong)
         } else {
-            print("❌ No songs found in music library at all!")
-            playbackError = MusicError.searchFailed
+            updatePlaybackFailure(MusicError.songUnavailable, state: "song unavailable")
         }
     }
     
-    private func playSong(_ mediaItem: MPMediaItem) async {
-        print("🎵 Setting up playback for: '\(mediaItem.title ?? "Unknown")' by \(mediaItem.artist ?? "Unknown")")
+    @discardableResult
+    private func playSong(_ mediaItem: MPMediaItem) async -> Bool {
+        configureAudioSession()
         
         // Check if the media item has required properties
         guard mediaItem.title != nil && mediaItem.artist != nil else {
-            print("❌ Media item missing title or artist")
-            playbackError = MusicError.searchFailed
-            return
+            updatePlaybackFailure(MusicError.songUnavailable, state: "song unavailable")
+            return false
         }
         
-        print("✅ Media item has required properties")
         
         let collection = MPMediaItemCollection(items: [mediaItem])
-        musicPlayer.setQueue(with: collection)
+        let descriptor = MPMusicPlayerMediaItemQueueDescriptor(itemCollection: collection)
+        musicPlayer.setQueue(with: descriptor)
         
-        print("📋 Queue set with \(collection.items.count) items")
-        print("▶️ Starting playback...")
         
-        // Check playback state before and after
-        let stateBefore = musicPlayer.playbackState
-        print("🎵 Playback state before: \(stateBefore.rawValue)")
         
         // Try to start playback
         musicPlayer.play()
@@ -561,39 +713,28 @@ final class MusicPlaybackManager: ObservableObject {
         try? await Task.sleep(nanoseconds: 500_000_000) // 0.5 seconds
         
         let stateAfter = musicPlayer.playbackState
-        print("🎵 Playback state after: \(stateAfter.rawValue)")
         
         // If still not playing, try a different approach
         if stateAfter != .playing {
-            print("🔄 First attempt failed, trying alternative approach...")
             
             // Stop any current playback first
             musicPlayer.stop()
             try? await Task.sleep(nanoseconds: 200_000_000) // 0.2 seconds
             
             // Set the queue again and try playing
-            musicPlayer.setQueue(with: collection)
+            musicPlayer.setQueue(with: descriptor)
             musicPlayer.play()
             
             // Wait a bit longer
             try? await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
             
             let finalState = musicPlayer.playbackState
-            print("🎵 Final playback state: \(finalState.rawValue)")
             
-            if finalState == .playing {
-                print("✅ Playback started successfully on second attempt")
-            } else {
+            if finalState != .playing {
                 print("❌ Playback failed to start after multiple attempts. Final state: \(finalState.rawValue)")
-                print("🔍 Debug info:")
-                print("   - Now playing item: \(musicPlayer.nowPlayingItem?.title ?? "None")")
-                print("   - Media item duration: \(mediaItem.playbackDuration)")
-                print("   - Media item title: \(mediaItem.title ?? "Unknown")")
-                print("   - Media item artist: \(mediaItem.artist ?? "Unknown")")
-                playbackError = MusicError.searchFailed
+                updatePlaybackFailure(MusicError.playbackFailed, state: "playback failed")
+                return false
             }
-        } else {
-            print("✅ Playback started successfully")
         }
         
         // Update current song info
@@ -606,42 +747,31 @@ final class MusicPlaybackManager: ObservableObject {
             duration: mediaItem.playbackDuration
         )
         
+        currentPlaybackTime = 0
         currentSongDuration = mediaItem.playbackDuration
+        clearPlaybackFailure()
+        playbackStateDescription = "playing"
         startPlaybackTimer()
-        
-        print("✅ Song setup complete. Duration: \(mediaItem.playbackDuration) seconds")
+
+        return true
     }
     
     // MARK: - Playback Control
     
     func playSongDirectly(_ mediaItem: MPMediaItem) async {
-        print("🎵 Direct playback for: '\(mediaItem.title ?? "Unknown")' by \(mediaItem.artist ?? "Unknown")")
-        
-        let collection = MPMediaItemCollection(items: [mediaItem])
-        musicPlayer.setQueue(with: collection)
-        
-        print("▶️ Starting direct playback...")
-        musicPlayer.play()
-        
-        // Wait and check
-        try? await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
-        
-        let state = musicPlayer.playbackState
-        print("🎵 Direct playback state: \(state.rawValue)")
-        
-        if state == .playing {
-            print("✅ Direct playback successful!")
-        } else {
-            print("❌ Direct playback failed. State: \(state.rawValue)")
-        }
+        _ = await playSong(mediaItem)
     }
     
     func play() {
+        configureAudioSession()
         musicPlayer.play()
+        playbackError = nil
+        playbackStateDescription = "playing"
     }
     
     func pause() {
         musicPlayer.pause()
+        playbackStateDescription = "paused"
     }
     
     func skipToNext() {
@@ -656,6 +786,11 @@ final class MusicPlaybackManager: ObservableObject {
         musicPlayer.stop()
         isPlaying = false
         currentSong = nil
+        currentSongDuration = 0
+        currentPlaybackTime = 0
+        playbackStateDescription = "stopped"
+        playbackError = nil
+        lastReportedSongID = nil
     }
     
     /// System volume can't be set programmatically on iOS. Use MPVolumeView in your UI instead.
@@ -670,14 +805,12 @@ final class MusicPlaybackManager: ObservableObject {
     
     private func startSuggestionTimer() {
         stopSuggestionTimer()
-        
-        // Check every 60 seconds for song transitions (much less aggressive)
-        suggestionTimer = Timer.scheduledTimer(withTimeInterval: 60.0, repeats: true) { [weak self] _ in
+        let interval: TimeInterval = 5.0
+        suggestionTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 await self?.checkForNextSongSuggestion()
             }
         }
-        print("⏰ Suggestion timer started (checking every 60 seconds)")
     }
     
     private func stopSuggestionTimer() {
@@ -705,32 +838,25 @@ final class MusicPlaybackManager: ObservableObject {
     }
     
     private func checkForNextSongSuggestion() async {
-        guard currentWorkoutContext != nil && !isGeneratingSuggestion else { 
-            print("❌ No workout context or already generating suggestion")
-            return 
+        // When coordinator is driving, it handles all song transitions via its own timers.
+        // This timer serves as a safety net only for non-coordinator mode.
+        guard !coordinatorDriven else { return }
+        guard currentWorkoutContext != nil && !isGeneratingSuggestion else {
+            return
         }
-        
+
         // Check if we need a new song suggestion
         let timeRemainingInSong = currentSongDuration - currentPlaybackTime
-        print("⏰ Song check: \(timeRemainingInSong) seconds remaining in current song")
-        
-        // Only suggest new song if:
-        // 1. Current song is ending soon (within 60 seconds) - increased from 30
-        // 2. We don't have a current song (song finished)
-        // 3. Song duration is 0 (no song playing)
-        // 4. AND we haven't generated a suggestion in the last 2 minutes
-        
-        let shouldGenerate = (timeRemainingInSong <= 60 || currentSongDuration == 0 || currentSong == nil)
-        
+
+        // Trigger next song at crossfade point (e.g. 4s before end) so transition happens before song ends
+        let shouldGenerate = (timeRemainingInSong <= crossfadeDuration || currentSongDuration == 0 || currentSong == nil)
+
         if shouldGenerate {
             // Check if we've generated a suggestion recently to prevent rapid looping
             let timeSinceLastSuggestion = Date().timeIntervalSince(lastSuggestionTime)
-            if timeSinceLastSuggestion > 120 { // 2 minutes minimum between suggestions
-                print("🎵 Time for next song! Generating suggestion...")
+            if timeSinceLastSuggestion > 15 { // 15 seconds minimum between suggestions
                 lastSuggestionTime = Date()
                 await generateNextSongSuggestion()
-            } else {
-                print("⏰ Skipping suggestion - too soon since last one (\(Int(timeSinceLastSuggestion))s ago)")
             }
         }
     }
@@ -739,29 +865,47 @@ final class MusicPlaybackManager: ObservableObject {
     
     @objc private func playbackStateChanged() {
         isPlaying = musicPlayer.playbackState == .playing
+        let nextState = switch musicPlayer.playbackState {
+        case .playing:
+            "playing"
+        case .paused:
+            "paused"
+        default:
+            "stopped"
+        }
+        if playbackError == nil || nextState == "playing" || nextState == "paused" {
+            playbackStateDescription = nextState
+        }
     }
     
     @objc private func playbackDidEnd() {
+        // When the coordinator is driving, don't auto-generate — it handles song transitions
+        guard !coordinatorDriven else {
+            return
+        }
+
         // Check if playback stopped and we're in a workout
         if musicPlayer.playbackState == .stopped && currentWorkoutContext != nil && !isGeneratingSuggestion {
             let timeSinceLastSuggestion = Date().timeIntervalSince(lastSuggestionTime)
-            if timeSinceLastSuggestion > 120 { // 2 minutes minimum between suggestions
-                print("🎵 Playback ended - generating next song")
+            if timeSinceLastSuggestion > 10 { // 10 seconds minimum between suggestions
                 lastSuggestionTime = Date()
                 Task {
                     await generateNextSongSuggestion()
                 }
-            } else {
-                print("⏰ Skipping playback end generation - too soon since last one (\(Int(timeSinceLastSuggestion))s ago)")
             }
         }
     }
     
     @objc private func nowPlayingItemChanged() {
         if let nowPlayingItem = musicPlayer.nowPlayingItem {
-            print("🎵 Now playing changed to: '\(nowPlayingItem.title ?? "Unknown")' by \(nowPlayingItem.artist ?? "Unknown")")
+            let songID = "\(nowPlayingItem.persistentID)"
+
+            // Suppress duplicate notifications for the same song
+            guard songID != lastReportedSongID else { return }
+            lastReportedSongID = songID
+
             currentSong = MusicSong(
-                id: "\(nowPlayingItem.persistentID)",
+                id: songID,
                 title: nowPlayingItem.title ?? "Unknown",
                 artist: nowPlayingItem.artist ?? "Unknown",
                 album: nowPlayingItem.albumTitle,
@@ -769,24 +913,28 @@ final class MusicPlaybackManager: ObservableObject {
                 duration: nowPlayingItem.playbackDuration
             )
             currentSongDuration = nowPlayingItem.playbackDuration
+            clearPlaybackFailure()
         } else {
-            print("🎵 No song playing")
+            lastReportedSongID = nil
             currentSong = nil
             currentSongDuration = 0
-            
+            if playbackError == nil {
+                playbackStateDescription = "stopped"
+            }
+
+            // When the coordinator is driving, don't auto-generate — it handles song transitions
+            guard !coordinatorDriven else { return }
+
             // Only generate next song if we're in a workout AND not already generating a suggestion
             // AND the playback state indicates the song actually ended (not just paused)
             // AND we haven't generated a suggestion recently
             if currentWorkoutContext != nil && !isGeneratingSuggestion && musicPlayer.playbackState == .stopped {
                 let timeSinceLastSuggestion = Date().timeIntervalSince(lastSuggestionTime)
-                if timeSinceLastSuggestion > 120 { // 2 minutes minimum between suggestions
-                    print("🎵 Song ended during workout - generating next song")
+                if timeSinceLastSuggestion > 10 { // 10 seconds minimum between suggestions
                     lastSuggestionTime = Date()
                     Task {
                         await generateNextSongSuggestion()
                     }
-                } else {
-                    print("⏰ Skipping song generation - too soon since last one (\(Int(timeSinceLastSuggestion))s ago)")
                 }
             }
         }
@@ -797,13 +945,11 @@ final class MusicPlaybackManager: ObservableObject {
     func fadeOutMusic() {
         // For MPMusicPlayerController, we can't directly control volume
         // We'll use a subtle approach - brief pause during speech
-        print("🎵 Pausing music for speech")
         musicPlayer.pause()
     }
     
     func fadeInMusic() {
         // Resume music after speech
-        print("🎵 Resuming music after speech")
         musicPlayer.play()
     }
     
@@ -832,29 +978,37 @@ struct WorkoutContext {
         totalDistance: Double,
         totalTime: TimeInterval,
         heartRate: Int?,
-        targetHeartRate: Int?
+        smoothedHeartRate: Int?,
+        heartRateTrend: HeartRateTrend,
+        hasStableHeartRateSignal: Bool,
+        targetHeartRate: Int?,
+        currentSongEndingIn: TimeInterval?,
+        recentSongs: [MusicSong]
     ) {
         self.segments = segments
-        self.currentSegmentIndex = currentSegmentIndex
-        self.currentSegment = segments[currentSegmentIndex]
-        self.upcomingSegment = currentSegmentIndex + 1 < segments.count ? segments[currentSegmentIndex + 1] : nil
+        self.currentSegmentIndex = min(currentSegmentIndex, segments.count - 1)
+        self.currentSegment = segments[self.currentSegmentIndex]
+        self.upcomingSegment = self.currentSegmentIndex + 1 < segments.count ? segments[self.currentSegmentIndex + 1] : nil
         self.totalDistance = totalDistance
         self.totalTime = totalTime
         
-        // Calculate current pace (meters per second)
-        let currentPace = totalTime > 0 ? totalDistance / totalTime : nil
+        // Calculate current speed in km/h. totalDistance is tracked in km.
+        let currentPace = totalTime > 0 ? (totalDistance / totalTime) * 3600.0 : nil
         
         // Determine if user is actively exercising based on distance and time
-        let isActive = totalDistance > 10 && totalTime > 30 // At least 10 meters in 30 seconds
+        let isActive = totalDistance > 0.01 && totalTime > 30 // At least 10 meters in 30 seconds
         
         self.musicContext = MusicContext(
             currentHeartRate: heartRate,
+            guidanceHeartRate: smoothedHeartRate,
             targetHeartRate: targetHeartRate,
+            heartRateTrend: heartRateTrend,
+            hasStableHeartRateSignal: hasStableHeartRateSignal,
             currentIntensity: currentSegment.intensity,
             timeRemainingInSegment: currentSegment.targetDuration,
-            currentSongEndingIn: nil, // Will be updated by MusicPlaybackManager
+            currentSongEndingIn: currentSongEndingIn,
             userPreferences: UserProfileManager.shared.userProfile.musicPreferences,
-            recentSongs: [], // Will be updated by MusicPlaybackManager
+            recentSongs: recentSongs,
             currentDistance: totalDistance,
             currentPace: currentPace,
             isActive: isActive
@@ -871,16 +1025,3 @@ struct WorkoutContext {
         return remaining
     }
 }
-
-// MARK: - Extensions
-extension RunSegment {
-    var targetDuration: TimeInterval {
-        switch target {
-        case .time(let seconds):
-            return TimeInterval(seconds)
-        case .distance:
-            return 0 // Will be calculated based on pace
-        }
-    }
-}
-

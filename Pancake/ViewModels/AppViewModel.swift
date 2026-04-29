@@ -4,13 +4,11 @@ import Combine
 // MARK: - App ViewModel
 @MainActor
 final class AppViewModel: ObservableObject {
-    @Published var isSignedIn: Bool = false
     @Published var allPermissionsGranted: Bool = false
     @Published var isLoading: Bool = false
     @Published var error: Error?
     
     // Dependencies
-    private let authManager = AuthManager.shared
     private let healthKitManager = HealthKitManager.shared
     private let locationManager = LocationManager.shared
     
@@ -22,10 +20,6 @@ final class AppViewModel: ObservableObject {
     }
     
     private func setupBindings() {
-        // Bind authentication state
-        authManager.$isSignedIn
-            .assign(to: &$isSignedIn)
-        
         // Bind permissions state
         Publishers.CombineLatest(
             healthKitManager.$isAuthorized,
@@ -37,8 +31,7 @@ final class AppViewModel: ObservableObject {
         .assign(to: &$allPermissionsGranted)
         
         // Bind error states
-        Publishers.Merge3(
-            authManager.$lastError.compactMap { $0 },
+        Publishers.Merge(
             healthKitManager.$lastAuthorizationError.compactMap { $0 },
             locationManager.$lastError.compactMap { $0 }
         )
@@ -55,14 +48,6 @@ final class AppViewModel: ObservableObject {
         isLoading = true
         await healthKitManager.refreshAuthorizationState()
         isLoading = false
-    }
-    
-    func signIn() {
-        authManager.signIn()
-    }
-    
-    func signOut() {
-        authManager.signOut()
     }
     
     func requestHealthAuthorization() {

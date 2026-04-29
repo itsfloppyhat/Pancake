@@ -1,37 +1,6 @@
 import SwiftUI
 import MediaPlayer
 
-// MARK: - Workout Phase Enum
-enum WorkoutPhase: String, CaseIterable, Identifiable {
-    case starting = "starting"
-    case midway = "midway"
-    case finishing = "finishing"
-    case interval = "interval"
-    case recovery = "recovery"
-    
-    var id: String { rawValue }
-    
-    var displayName: String {
-        switch self {
-        case .starting: return "Starting"
-        case .midway: return "Midway"
-        case .finishing: return "Finishing"
-        case .interval: return "Interval"
-        case .recovery: return "Recovery"
-        }
-    }
-    
-    var description: String {
-        switch self {
-        case .starting: return "Beginning of workout"
-        case .midway: return "Middle of workout"
-        case .finishing: return "End of workout"
-        case .interval: return "High intensity interval"
-        case .recovery: return "Recovery period"
-        }
-    }
-}
-
 struct MusicDebugView: View {
     @StateObject private var viewModel = MusicDebugViewModel()
     
@@ -42,7 +11,7 @@ struct MusicDebugView: View {
                 Section("Music Authorization") {
                     HStack {
                         Image(systemName: viewModel.isMusicAuthorized ? "checkmark.circle.fill" : "xmark.circle.fill")
-                            .foregroundColor(viewModel.isMusicAuthorized ? .green : .red)
+                            .foregroundColor(viewModel.isMusicAuthorized ? .pastelMint : .pastelCoral)
                         
                         VStack(alignment: .leading) {
                             Text("Apple Music Access")
@@ -58,8 +27,7 @@ struct MusicDebugView: View {
                             Button("Request Access") {
                                 viewModel.requestMusicAuthorization()
                             }
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.small)
+                            .buttonStyle(BubblySmallButtonStyle(backgroundColor: .pastelPeriwinkle))
                         }
                     }
                 }
@@ -78,25 +46,26 @@ struct MusicDebugView: View {
                         viewModel.loadLibraryCount()
                     }
                     .buttonStyle(.bordered)
+                    .tint(.pastelLavender)
                 }
                 
-                // ChatGPT Status
-                Section("ChatGPT API") {
+                // AI Status
+                Section("Apple Intelligence") {
                     HStack {
-                        Image(systemName: viewModel.isChatGPTConfigured ? "checkmark.circle.fill" : "xmark.circle.fill")
-                            .foregroundColor(viewModel.isChatGPTConfigured ? .green : .red)
-                        
+                        Image(systemName: viewModel.isAIConfigured ? "checkmark.circle.fill" : "xmark.circle.fill")
+                            .foregroundColor(viewModel.isAIConfigured ? .pastelMint : .pastelCoral)
+
                         VStack(alignment: .leading) {
-                            Text("API Key Status")
+                            Text("AI Status")
                                 .font(.headline)
-                            Text(viewModel.isChatGPTConfigured ? "Configured" : "Not Configured")
+                            Text(viewModel.isAIConfigured ? "Available" : "Not Available")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }
-                        
+
                         Spacer()
-                        
-                        if viewModel.isChatGPTConfigured {
+
+                        if viewModel.isAIConfigured {
                             Text("✅")
                         } else {
                             Text("❌")
@@ -154,7 +123,7 @@ struct MusicDebugView: View {
                                 Text("\(Int(viewModel.currentHeartRate))")
                                     .font(.headline)
                                     .fontWeight(.semibold)
-                                    .foregroundColor(.blue)
+                                    .foregroundColor(.pastelPeriwinkle)
                                     .frame(width: 50)
                             }
                         }
@@ -177,7 +146,7 @@ struct MusicDebugView: View {
                                     Text("\(viewModel.currentDistance, specifier: "%.1f")")
                                         .font(.headline)
                                         .fontWeight(.semibold)
-                                        .foregroundColor(.blue)
+                                        .foregroundColor(.pastelPeriwinkle)
                                         .frame(width: 50)
                                 }
                             }
@@ -198,7 +167,7 @@ struct MusicDebugView: View {
                                     Text("\(Int(viewModel.currentTime))")
                                         .font(.headline)
                                         .fontWeight(.semibold)
-                                        .foregroundColor(.blue)
+                                        .foregroundColor(.pastelPeriwinkle)
                                         .frame(width: 50)
                                 }
                             }
@@ -233,24 +202,28 @@ struct MusicDebugView: View {
                                     viewModel.setEasy5KScenario()
                                 }
                                 .buttonStyle(.bordered)
+                    .tint(.pastelLavender)
                                 .font(.caption)
                                 
                                 Button("⚡ Interval Training") {
                                     viewModel.setIntervalScenario()
                                 }
                                 .buttonStyle(.bordered)
+                    .tint(.pastelLavender)
                                 .font(.caption)
                                 
                                 Button("🏁 Finish Strong") {
                                     viewModel.setFinishStrongScenario()
                                 }
                                 .buttonStyle(.bordered)
+                    .tint(.pastelLavender)
                                 .font(.caption)
                                 
                                 Button("🧘‍♀️ Recovery Run") {
                                     viewModel.setRecoveryScenario()
                                 }
                                 .buttonStyle(.bordered)
+                    .tint(.pastelLavender)
                                 .font(.caption)
                             }
                         }
@@ -268,8 +241,8 @@ struct MusicDebugView: View {
                             }
                             .frame(maxWidth: .infinity)
                         }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(viewModel.isTesting || !viewModel.isChatGPTConfigured)
+                        .buttonStyle(BubblyGradientButtonStyle(gradient: .pastelPrimary))
+                        .disabled(viewModel.isTesting || !viewModel.isAIConfigured)
                         
                         // Template Preview
                         VStack(alignment: .leading, spacing: 8) {
@@ -289,7 +262,7 @@ struct MusicDebugView: View {
                                     .font(.caption)
                             }
                             .padding(8)
-                            .background(Color(.systemGray6))
+                            .background(Color.pastelLavender.opacity(0.08))
                             .cornerRadius(8)
                         }
                         
@@ -324,7 +297,7 @@ struct MusicDebugView: View {
                                         Text(suggestion.mood.displayName)
                                             .font(.caption)
                                             .fontWeight(.medium)
-                                            .foregroundColor(.blue)
+                                            .foregroundColor(.pastelPeriwinkle)
                                         
                                         Spacer()
                                         
@@ -334,7 +307,7 @@ struct MusicDebugView: View {
                                     }
                                 }
                                 .padding()
-                                .background(Color(.systemGray6))
+                                .background(Color.pastelLavender.opacity(0.08))
                                 .cornerRadius(12)
                                 
                                 // Play Buttons
@@ -347,6 +320,7 @@ struct MusicDebugView: View {
                                         .frame(maxWidth: .infinity)
                                     }
                                     .buttonStyle(.bordered)
+                    .tint(.pastelLavender)
                                     .disabled(!viewModel.isMusicAuthorized)
                                     
                                     Button(action: { Task { await viewModel.playAppleMusicSuggestion() } }) {
@@ -357,6 +331,7 @@ struct MusicDebugView: View {
                                         .frame(maxWidth: .infinity)
                                     }
                                     .buttonStyle(.bordered)
+                    .tint(.pastelLavender)
                                     .disabled(!viewModel.isMusicAuthorized)
                                 }
                                 
@@ -369,6 +344,7 @@ struct MusicDebugView: View {
                                     .frame(maxWidth: .infinity)
                                 }
                                 .buttonStyle(.bordered)
+                    .tint(.pastelLavender)
                                 .disabled(!viewModel.isMusicAuthorized)
                             }
                         }
@@ -406,7 +382,7 @@ struct MusicDebugView: View {
                 Section("Current Playback") {
                     HStack {
                         Image(systemName: viewModel.isPlaying ? "play.circle.fill" : "pause.circle.fill")
-                            .foregroundColor(viewModel.isPlaying ? .green : .orange)
+                            .foregroundColor(viewModel.isPlaying ? .pastelMint : .pastelPeach)
                         
                         VStack(alignment: .leading) {
                             Text("Playback Status")
@@ -434,20 +410,17 @@ struct MusicDebugView: View {
                     if let error = viewModel.error {
                         Text("Error: \(error.localizedDescription)")
                             .font(.caption)
-                            .foregroundColor(.red)
+                            .foregroundColor(.pastelCoral)
                     }
                 }
                 
                 // Debug Actions
                 Section("Debug Actions") {
                     Button("Check Console Logs") {
-                        print("🔍 Manual debug check triggered")
-                        print("📱 Music Auth: \(viewModel.isMusicAuthorized)")
-                        print("🤖 ChatGPT: \(viewModel.isChatGPTConfigured)")
-                        print("🎵 Library Count: \(viewModel.libraryCount)")
-                        print("▶️ Playing: \(viewModel.isPlaying)")
+                        // No-op: debug prints removed
                     }
                     .buttonStyle(.bordered)
+                    .tint(.pastelLavender)
                 }
             }
             .navigationTitle("Music Debug")
@@ -475,6 +448,10 @@ extension MPMediaLibraryAuthorizationStatus {
     }
 }
 
-#Preview {
-    MusicDebugView()
+#if DEBUG
+struct MusicDebugView_Previews: PreviewProvider {
+    static var previews: some View {
+        MusicDebugView()
+    }
 }
+#endif
