@@ -275,9 +275,11 @@ struct CompactCurrentSegmentView: View {
     
     private var intensityColor: Color {
         switch segment.intensity {
-        case .easy: return .green
-        case .medium: return .orange
-        case .hard: return .red
+        case .zone1: return .blue
+        case .zone2: return .green
+        case .zone3: return .yellow
+        case .zone4: return .orange
+        case .zone5: return .red
         }
     }
     

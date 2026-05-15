@@ -739,24 +739,28 @@ final class WorkoutMusicCoordinator: ObservableObject {
         case .time(let seconds):
             return TimeInterval(seconds)
         case .distance(let meters):
-            // Estimate duration: ~6 min/km easy, ~5 min/km medium, ~4 min/km hard
+            // Estimate duration by planned heart-rate zone.
             let paceSecondsPerMeter: Double = switch segment.intensity {
-            case .easy: 0.36   // 6:00/km
-            case .medium: 0.30 // 5:00/km
-            case .hard: 0.24   // 4:00/km
+            case .zone1: 0.42 // 7:00/km
+            case .zone2: 0.36 // 6:00/km
+            case .zone3: 0.30 // 5:00/km
+            case .zone4: 0.24 // 4:00/km
+            case .zone5: 0.21 // 3:30/km
             }
             return Double(meters) * paceSecondsPerMeter
         }
     }
 
-    /// Looks ahead from the current segment and computes the dominant (highest) intensity
+    /// Looks ahead from the current segment and computes the dominant highest zone
     /// over the next ~3-4 minutes of segments. This prevents choosing a chill song right
-    /// before a hard effort, or during a brief recovery between hard efforts.
+    /// before a high-zone effort, or during a brief recovery between high-zone efforts.
     private func lookaheadIntensity(from segmentIndex: Int, segments: [RunSegment]) -> Intensity {
         let lookaheadWindowSeconds: TimeInterval = 210 // 3.5 minutes
 
         var accumulatedTime: TimeInterval = 0
-        var intensityCounts: [Intensity: TimeInterval] = [.easy: 0, .medium: 0, .hard: 0]
+        var intensityCounts = Dictionary(
+            uniqueKeysWithValues: Intensity.allCases.map { ($0, TimeInterval.zero) }
+        )
 
         for i in segmentIndex..<segments.count {
             let seg = segments[i]
@@ -770,14 +774,18 @@ final class WorkoutMusicCoordinator: ObservableObject {
             if accumulatedTime >= lookaheadWindowSeconds { break }
         }
 
-        // Return the peak (highest) intensity that occupies a meaningful portion of the window.
-        // "Meaningful" = at least 20% of the window, so a single 30s hard burst in 3.5 min
-        // of easy running won't force a hard song.
+        // Return the highest zone that occupies a meaningful portion of the window.
+        // "Meaningful" = at least 20% of the window, so a single 30s Zone 5 burst in
+        // 3.5 min of Zone 2 running won't force a peak-effort song.
         let threshold = lookaheadWindowSeconds * 0.20
 
-        if (intensityCounts[.hard] ?? 0) >= threshold { return .hard }
-        if (intensityCounts[.medium] ?? 0) >= threshold { return .medium }
-        return .easy
+        for intensity in Intensity.allCases.reversed() {
+            if (intensityCounts[intensity] ?? 0) >= threshold {
+                return intensity
+            }
+        }
+
+        return segments[min(segmentIndex, segments.count - 1)].intensity
     }
 
     /// Returns the effective intensity to use for music selection at the given segment index.
@@ -953,8 +961,8 @@ final class WorkoutMusicCoordinator: ObservableObject {
                 startWorkoutMusic(segments: segments)
             } else {
                 // Watch started a workout without iPhone sending a plan first.
-                // Start music with a default single easy segment so the user still gets music.
-                let defaultSegments = [RunSegment(intensity: .easy, target: .time(seconds: 1800))]
+                // Start music with a default single Zone 2 segment so the user still gets music.
+                let defaultSegments = [RunSegment(intensity: .zone2, target: .time(seconds: 1800))]
                 startWorkoutMusic(segments: defaultSegments)
             }
 
@@ -993,7 +1001,7 @@ final class WorkoutMusicCoordinator: ObservableObject {
 
         let segments = rawSegments.compactMap { rawSegment -> RunSegment? in
             guard let intensityRaw = rawSegment["intensity"] as? String,
-                  let intensity = Intensity(rawValue: intensityRaw),
+                  let intensity = Intensity.fromStoredRawValue(intensityRaw),
                   let targetDictionary = rawSegment["target"] as? [String: Any],
                   let targetType = targetDictionary["type"] as? String,
                   let targetValue = targetDictionary["value"] as? Int else {
@@ -1239,12 +1247,18 @@ final class WorkoutMusicCoordinator: ObservableObject {
         heartRate: Int?,
         targetHeartRate: Int?
     ) -> WorkoutContext {
+        let currentSegment = if segments.isEmpty {
+            RunSegment()
+        } else {
+            segments[min(currentSegmentIndex, segments.count - 1)]
+        }
+        let effectiveTargetHeartRate = targetHeartRate ?? currentSegment.intensity.defaultTargetHeartRate
         let smoothedHeartRate = MusicRecommendationPolicy.smoothedHeartRate(from: recentHeartRateSamples)
         let heartRateTrend = MusicRecommendationPolicy.heartRateTrend(from: recentHeartRateSamples)
         let hasStableHeartRateSignal =
             recentHeartRateSamples.count >= 4 ||
             MusicRecommendationPolicy.hasStableHeartRateMismatch(
-                targetHeartRate: targetHeartRate,
+                targetHeartRate: effectiveTargetHeartRate,
                 samples: recentHeartRateSamples
             )
         let currentSongEndingIn: TimeInterval? = if musicManager.currentSongDuration > 0 {
@@ -1262,7 +1276,7 @@ final class WorkoutMusicCoordinator: ObservableObject {
             smoothedHeartRate: smoothedHeartRate,
             heartRateTrend: heartRateTrend,
             hasStableHeartRateSignal: hasStableHeartRateSignal,
-            targetHeartRate: targetHeartRate,
+            targetHeartRate: effectiveTargetHeartRate,
             currentSongEndingIn: currentSongEndingIn,
             recentSongs: recentPlayedSongs
         )

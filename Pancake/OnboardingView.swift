@@ -83,7 +83,7 @@ struct OnboardingView: View {
                 if authManager.isAuthenticated {
                     OnboardingStatusLine(icon: "checkmark.circle.fill", text: "Signed in as \(authManager.displayName)", color: .pastelMint)
                 } else {
-                    Text("Sign in keeps your account ready for future sync features. You can continue without it for this TestFlight build.")
+                    Text("Sign in keeps your account ready for future sync features. You can continue without an account.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
 

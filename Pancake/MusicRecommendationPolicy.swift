@@ -90,19 +90,19 @@ enum MusicTasteProfileBuilder {
         let primaryArtists = preferences.favoriteArtists
             .map(\.name)
             .filter { !$0.isEmpty }
-            .prefix(5)
+            .prefix(12)
             .map { $0 }
 
         let supportingArtists = preferences.importedPlaylistArtists
             .map(\.name)
             .filter { !$0.isEmpty }
             .filter { !primaryArtists.contains($0) }
-            .prefix(6)
+            .prefix(8)
             .map { $0 }
 
         let primarySongs = preferences.favoriteSongs
             .map { "\($0.title) by \($0.artist)" }
-            .prefix(4)
+            .prefix(8)
             .map { $0 }
 
         let supportingSongs = preferences.importedPlaylistSongs
@@ -115,7 +115,7 @@ enum MusicTasteProfileBuilder {
             .filter(\.isSelected)
             .map(\.name)
             .filter { !$0.isEmpty }
-            .prefix(6)
+            .prefix(10)
             .map { $0 }
 
         return MusicTastePromptProfile(
@@ -228,11 +228,15 @@ enum MusicRecommendationPolicy {
 
     static func defaultMood(for intensity: Intensity) -> MusicMood {
         switch intensity {
-        case .easy:
+        case .zone1:
+            return .calming
+        case .zone2:
             return .chill
-        case .medium:
+        case .zone3:
             return .energetic
-        case .hard:
+        case .zone4:
+            return .motivational
+        case .zone5:
             return .intense
         }
     }

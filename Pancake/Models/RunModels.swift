@@ -2,30 +2,130 @@ import Foundation
 
 // MARK: - Intensity
 enum Intensity: String, CaseIterable, Identifiable, Codable, Hashable {
-    case easy
-    case medium
-    case hard
+    case zone1
+    case zone2
+    case zone3
+    case zone4
+    case zone5
+
+    static let defaultMaxHeartRate = 190
 
     var id: String { rawValue }
 
+    var zoneNumber: Int {
+        switch self {
+        case .zone1: return 1
+        case .zone2: return 2
+        case .zone3: return 3
+        case .zone4: return 4
+        case .zone5: return 5
+        }
+    }
+
     var label: String {
-        rawValue.capitalized
+        "Zone \(zoneNumber)"
     }
 
     var color: String {
         switch self {
-        case .easy: return "green"
-        case .medium: return "orange"
-        case .hard: return "red"
+        case .zone1: return "blue"
+        case .zone2: return "green"
+        case .zone3: return "yellow"
+        case .zone4: return "orange"
+        case .zone5: return "red"
         }
     }
 
     var description: String {
         switch self {
-        case .easy: return "Comfortable pace, can hold a conversation"
-        case .medium: return "Moderate effort, breathing harder"
-        case .hard: return "High effort, difficult to speak"
+        case .zone1: return "50-60% HRmax, very light recovery or warm-up"
+        case .zone2: return "60-70% HRmax, easy aerobic base"
+        case .zone3: return "70-80% HRmax, steady tempo effort"
+        case .zone4: return "80-90% HRmax, hard threshold effort"
+        case .zone5: return "90-100% HRmax, maximum short-interval effort"
         }
+    }
+
+    var percentRange: (lower: Double, upper: Double) {
+        switch self {
+        case .zone1: return (0.50, 0.60)
+        case .zone2: return (0.60, 0.70)
+        case .zone3: return (0.70, 0.80)
+        case .zone4: return (0.80, 0.90)
+        case .zone5: return (0.90, 1.00)
+        }
+    }
+
+    var percentDescription: String {
+        let range = percentRange
+        return "\(Int(range.lower * 100))-\(Int(range.upper * 100))% HRmax"
+    }
+
+    var targetDescription: String {
+        switch self {
+        case .zone1: return "recovery, warm-up, and cool-down"
+        case .zone2: return "aerobic base and easy endurance"
+        case .zone3: return "tempo and controlled moderate work"
+        case .zone4: return "threshold and hard intervals"
+        case .zone5: return "VO2 max, anaerobic, and peak bursts"
+        }
+    }
+
+    var defaultHeartRateRange: ClosedRange<Int> {
+        heartRateRange(maxHeartRate: Self.defaultMaxHeartRate)
+    }
+
+    var defaultTargetHeartRate: Int {
+        targetHeartRate(maxHeartRate: Self.defaultMaxHeartRate)
+    }
+
+    func heartRateRange(maxHeartRate: Int) -> ClosedRange<Int> {
+        let range = percentRange
+        let lower = Int((Double(maxHeartRate) * range.lower).rounded())
+        let upper = Int((Double(maxHeartRate) * range.upper).rounded())
+        return lower...upper
+    }
+
+    func targetHeartRate(maxHeartRate: Int) -> Int {
+        let range = percentRange
+        return Int((Double(maxHeartRate) * ((range.lower + range.upper) / 2)).rounded())
+    }
+
+    static func estimatedMaxHeartRate(age: Int?) -> Int? {
+        guard let age else { return nil }
+        return max(120, 220 - age)
+    }
+
+    static func fromStoredRawValue(_ rawValue: String) -> Intensity? {
+        switch rawValue {
+        case "easy":
+            return .zone2
+        case "medium":
+            return .zone3
+        case "hard":
+            return .zone4
+        default:
+            return Intensity(rawValue: rawValue)
+        }
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let rawValue = try container.decode(String.self)
+
+        guard let intensity = Self.fromStoredRawValue(rawValue) else {
+            throw DecodingError.dataCorruptedError(
+                in: container,
+                debugDescription: "Unknown intensity value: \(rawValue)"
+            )
+        }
+
+        self = intensity
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
     }
 }
 
@@ -94,7 +194,7 @@ struct RunSegment: Identifiable, Codable, Equatable, Hashable {
     var intensity: Intensity
     var target: Target
 
-    init(id: UUID = UUID(), intensity: Intensity = .easy, target: Target = .time(seconds: 300)) {
+    init(id: UUID = UUID(), intensity: Intensity = .zone2, target: Target = .time(seconds: 300)) {
         self.id = id
         self.intensity = intensity
         self.target = target
@@ -295,5 +395,13 @@ extension Int {
         } else {
             return "\(self) m"
         }
+    }
+}
+
+extension TimeInterval {
+    func formattedTime() -> String {
+        let minutes = Int(self) / 60
+        let seconds = Int(self) % 60
+        return String(format: "%d:%02d", minutes, seconds)
     }
 }

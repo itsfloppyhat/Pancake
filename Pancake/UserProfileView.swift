@@ -451,7 +451,7 @@ struct MusicPreferencesView: View {
                 }
                 
                 // Mood Preferences Section
-                Section("Mood Preferences by Intensity") {
+                Section("Mood Preferences by Zone") {
                     ForEach(Intensity.allCases) { intensity in
                         MoodPreferenceRowView(
                             intensity: intensity,
@@ -818,15 +818,6 @@ struct PersonalInfoView: View {
                 }
             }
         }
-    }
-}
-
-// MARK: - Extensions
-extension TimeInterval {
-    func formattedTime() -> String {
-        let minutes = Int(self) / 60
-        let seconds = Int(self) % 60
-        return String(format: "%d:%02d", minutes, seconds)
     }
 }
 

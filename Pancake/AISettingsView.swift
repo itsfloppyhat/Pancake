@@ -132,7 +132,7 @@ struct AISettingsView: View {
                         RequirementRowView(
                             icon: "iphone",
                             title: "Compatible Device",
-                            description: "iPhone 15 Pro or later, iPad with M-series chip"
+                            description: "iPhone 15 Pro or later"
                         )
 
                         RequirementRowView(

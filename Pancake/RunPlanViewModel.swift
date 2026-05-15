@@ -74,21 +74,21 @@ final class RunPlanViewModel: ObservableObject {
         clearAllSegments()
         
         // Warm-up
-        addSegment(RunSegment(intensity: .easy, target: .time(seconds: 300))) // 5 min
-        
+        addSegment(RunSegment(intensity: .zone2, target: .time(seconds: 300))) // 5 min
+
         // Intervals (3x)
         for _ in 0..<3 {
-            addSegment(RunSegment(intensity: .hard, target: .time(seconds: 120))) // 2 min hard
-            addSegment(RunSegment(intensity: .easy, target: .time(seconds: 120))) // 2 min easy
+            addSegment(RunSegment(intensity: .zone4, target: .time(seconds: 120))) // 2 min threshold
+            addSegment(RunSegment(intensity: .zone2, target: .time(seconds: 120))) // 2 min aerobic recovery
         }
         
         // Cool-down
-        addSegment(RunSegment(intensity: .easy, target: .time(seconds: 300))) // 5 min
+        addSegment(RunSegment(intensity: .zone1, target: .time(seconds: 300))) // 5 min
     }
     
     /// Creates a long run template
     func addLongRunTemplate() {
         clearAllSegments()
-        addSegment(RunSegment(intensity: .easy, target: .distance(meters: 5000))) // 5K easy
+        addSegment(RunSegment(intensity: .zone2, target: .distance(meters: 5000))) // 5K aerobic base
     }
 }

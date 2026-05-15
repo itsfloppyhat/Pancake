@@ -17,6 +17,21 @@ extension Color {
     // Card and background tints
     static let pastelCardBackground = Color(red: 0.96, green: 0.95, blue: 1.0) // Very light lavender
     static let pastelGroupedBackground = Color(red: 0.97, green: 0.96, blue: 1.0)
+    static var pancakeSystemBackground: Color {
+#if os(macOS)
+        Color(nsColor: .windowBackgroundColor)
+#else
+        Color(.systemBackground)
+#endif
+    }
+
+    static var pancakeSystemGray6: Color {
+#if os(macOS)
+        Color(nsColor: .controlBackgroundColor)
+#else
+        Color(.systemGray6)
+#endif
+    }
 
     // Intensity colors (pastel versions)
     static let pastelEasy = Color(red: 0.60, green: 0.90, blue: 0.78)          // Mint
@@ -124,7 +139,7 @@ struct BubblyCardModifier: ViewModifier {
             .padding(padding)
             .background(
                 RoundedRectangle(cornerRadius: 20, style: .continuous)
-                    .fill(Color(.systemBackground))
+                    .fill(Color.pancakeSystemBackground)
                     .shadow(color: Color.pastelLavender.opacity(0.18), radius: 8, x: 0, y: 4)
             )
     }
@@ -202,7 +217,7 @@ struct PastelTagStyle: ViewModifier {
             .padding(.horizontal, 12)
             .background(
                 Capsule()
-                    .fill(isSelected ? activeColor.opacity(0.2) : Color(.systemGray6))
+                    .fill(isSelected ? activeColor.opacity(0.2) : Color.pancakeSystemGray6)
             )
             .overlay(
                 Capsule()
@@ -223,9 +238,11 @@ extension View {
 extension Intensity {
     var pastelColor: Color {
         switch self {
-        case .easy: return .pastelMint
-        case .medium: return .pastelPeach
-        case .hard: return .pastelCoral
+        case .zone1: return .pastelSky
+        case .zone2: return .pastelMint
+        case .zone3: return .pastelLemon
+        case .zone4: return .pastelPeach
+        case .zone5: return .pastelCoral
         }
     }
 }

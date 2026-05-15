@@ -214,6 +214,7 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
             // Store planned segments
             self.plannedSegments = segments
             self.currentSegmentIndex = 0
+            self.targetHeartRate = segments.first?.intensity.defaultTargetHeartRate
 
             // Initialize segment tracking
             self.segmentStartTime = Date()
@@ -400,6 +401,7 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
 
                 // Move to next segment
                 currentSegmentIndex += 1
+                targetHeartRate = currentSegment?.intensity.defaultTargetHeartRate
                 
                 // Reset segment tracking for new segment
                 segmentStartTime = Date()
@@ -583,6 +585,7 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
             // Reset state
             self.currentSegmentIndex = 0
             self.plannedSegments = []
+            self.targetHeartRate = nil
             self.workoutStartDate = nil
             self.segmentStartTime = nil
             self.segmentStartDistance = 0

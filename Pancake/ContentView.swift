@@ -364,7 +364,7 @@ private struct RunSetupReadinessCard: View {
 // MARK: - Segment Creation Card
 struct SegmentCreationCard: View {
     @ObservedObject var viewModel: RunSetupViewModel
-    @State private var newIntensity: Intensity = .easy
+    @State private var newIntensity: Intensity = .zone2
     @State private var isTimeTarget: Bool = true
     @State private var timeSeconds: Int = 300
     @State private var distanceMeters: Int = 1000
@@ -376,19 +376,19 @@ struct SegmentCreationCard: View {
                 .fontWeight(.semibold)
             
             VStack(spacing: 12) {
-                // Intensity Picker
+                // Target zone picker
                 HStack {
-                    Text("Intensity")
+                    Text("Target Zone")
                         .font(.subheadline)
                         .fontWeight(.medium)
                     Spacer()
-                    Picker("Intensity", selection: $newIntensity) {
+                    Picker("Target Zone", selection: $newIntensity) {
                         ForEach(Intensity.allCases) { intensity in
                             Text(intensity.label).tag(intensity)
                         }
                     }
                     .pickerStyle(.segmented)
-                    .frame(width: 200)
+                    .frame(width: 300)
                 }
                 
                 // Target Type Selection
@@ -651,7 +651,7 @@ struct QuickTemplatesCard: View {
                             Text("Interval Workout")
                                 .font(.subheadline)
                                 .fontWeight(.medium)
-                            Text("5min warm-up, 3x2min hard/2min easy, 5min cool-down")
+                            Text("5min Zone 2, 3x2min Zone 4/2min Zone 2, 5min Zone 1")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -668,7 +668,7 @@ struct QuickTemplatesCard: View {
                             Text("Long Run")
                                 .font(.subheadline)
                                 .fontWeight(.medium)
-                            Text("5K easy pace")
+                            Text("5K Zone 2 aerobic base")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -1255,14 +1255,16 @@ struct SongDetailView: View {
 
         // Heart rate insight
         if let hr = avgHeartRate {
-            if hr > 170 {
-                parts.append("High-intensity moment (avg \(hr) bpm) — likely chosen for its driving energy.")
-            } else if hr > 150 {
-                parts.append("Moderate effort (avg \(hr) bpm) — a solid tempo match for steady running.")
-            } else if hr > 130 {
-                parts.append("Easy-zone effort (avg \(hr) bpm) — a relaxed pick to keep things comfortable.")
+            if hr >= Intensity.zone5.defaultHeartRateRange.lowerBound {
+                parts.append("Zone 5 moment (avg \(hr) bpm) — likely chosen for peak-effort energy.")
+            } else if hr >= Intensity.zone4.defaultHeartRateRange.lowerBound {
+                parts.append("Zone 4 effort (avg \(hr) bpm) — likely chosen for driving threshold energy.")
+            } else if hr >= Intensity.zone3.defaultHeartRateRange.lowerBound {
+                parts.append("Zone 3 effort (avg \(hr) bpm) — a solid tempo match for steady running.")
+            } else if hr >= Intensity.zone2.defaultHeartRateRange.lowerBound {
+                parts.append("Zone 2 effort (avg \(hr) bpm) — a relaxed pick to keep things comfortable.")
             } else {
-                parts.append("Low heart rate (avg \(hr) bpm) — warming up or cooling down.")
+                parts.append("Zone 1 effort (avg \(hr) bpm) — warming up, cooling down, or recovering.")
             }
         }
 

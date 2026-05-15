@@ -93,12 +93,12 @@ struct MusicDebugView: View {
                             .pickerStyle(.segmented)
                         }
                         
-                        // Intensity Selection
+                        // Target zone selection
                         VStack(alignment: .leading, spacing: 8) {
-                            Text("Intensity Level")
+                            Text("Target Zone")
                                 .font(.headline)
                             
-                            Picker("Intensity", selection: $viewModel.selectedIntensity) {
+                            Picker("Target Zone", selection: $viewModel.selectedIntensity) {
                                 ForEach(Intensity.allCases) { intensity in
                                     Text(intensity.label).tag(intensity)
                                 }
@@ -198,7 +198,7 @@ struct MusicDebugView: View {
                                 GridItem(.flexible()),
                                 GridItem(.flexible())
                             ], spacing: 8) {
-                                Button("🏃‍♂️ Easy 5K") {
+                                Button("🏃‍♂️ Zone 2 5K") {
                                     viewModel.setEasy5KScenario()
                                 }
                                 .buttonStyle(.bordered)
@@ -252,7 +252,7 @@ struct MusicDebugView: View {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text("🎭 Workout Phase: \(viewModel.selectedWorkoutPhase.displayName)")
                                     .font(.caption)
-                                Text("⚡ Intensity: \(viewModel.selectedIntensity.label)")
+                                Text("⚡ Target Zone: \(viewModel.selectedIntensity.label)")
                                     .font(.caption)
                                 Text("💓 Heart Rate: \(Int(viewModel.currentHeartRate)) BPM")
                                     .font(.caption)

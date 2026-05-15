@@ -1,6 +1,8 @@
 import Foundation
 import MusicKit
+#if !os(macOS)
 import MediaPlayer
+#endif
 
 @MainActor
 class MusicKitService: ObservableObject {
@@ -12,7 +14,11 @@ class MusicKitService: ObservableObject {
     @Published var isPlaying = false
     @Published var playbackError: Error?
     
+    #if os(macOS)
+    private let musicPlayer = ApplicationMusicPlayer.shared
+    #else
     private let musicPlayer = MPMusicPlayerController.systemMusicPlayer
+    #endif
     
     private init() {
         updateAuthorizationStatus()
@@ -87,6 +93,21 @@ class MusicKitService: ObservableObject {
             throw MusicKitError.notAuthorized
         }
         
+        #if os(macOS)
+        let player = ApplicationMusicPlayer.shared
+        player.queue = ApplicationMusicPlayer.Queue(for: [song])
+        try await player.prepareToPlay()
+        try await player.play()
+
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        guard player.state.playbackStatus == .playing else {
+            await MainActor.run {
+                self.playbackError = MusicKitError.playbackFailed
+                self.isPlaying = false
+            }
+            throw MusicKitError.playbackFailed
+        }
+        #else
         // Use MPMusicPlayerController for playback
         let player = MPMusicPlayerController.applicationQueuePlayer
         
@@ -104,6 +125,7 @@ class MusicKitService: ObservableObject {
             }
             throw MusicKitError.playbackFailed
         }
+        #endif
         
         await MainActor.run {
             self.currentSong = song
@@ -118,6 +140,35 @@ class MusicKitService: ObservableObject {
             throw MusicKitError.notAuthorized
         }
         
+        #if os(macOS)
+        let player = ApplicationMusicPlayer.shared
+
+        guard !songs.isEmpty else {
+            await MainActor.run {
+                self.playbackError = MusicKitError.playbackFailed
+            }
+            throw MusicKitError.playbackFailed
+        }
+
+        player.queue = ApplicationMusicPlayer.Queue(for: songs)
+        try await player.prepareToPlay()
+        try await player.play()
+
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        guard player.state.playbackStatus == .playing else {
+            await MainActor.run {
+                self.playbackError = MusicKitError.playbackFailed
+                self.isPlaying = false
+            }
+            throw MusicKitError.playbackFailed
+        }
+
+        await MainActor.run {
+            self.currentSong = songs.first
+            self.isPlaying = true
+            self.playbackError = nil
+        }
+        #else
         let player = MPMusicPlayerController.applicationQueuePlayer
         let storeIDs = songs.map { $0.id.rawValue }
         
@@ -138,27 +189,45 @@ class MusicKitService: ObservableObject {
             }
             throw MusicKitError.playbackFailed
         }
+        #endif
     }
     
     func pause() async {
+        #if os(macOS)
+        let player = ApplicationMusicPlayer.shared
+        player.pause()
+        #else
         let player = MPMusicPlayerController.applicationQueuePlayer
         player.pause()
+        #endif
         await MainActor.run {
             self.isPlaying = false
         }
     }
     
     func resume() async {
+        #if os(macOS)
+        let player = ApplicationMusicPlayer.shared
+        try? await player.play()
+        let isNowPlaying = player.state.playbackStatus == .playing
+        #else
         let player = MPMusicPlayerController.applicationQueuePlayer
         player.play()
+        let isNowPlaying = true
+        #endif
         await MainActor.run {
-            self.isPlaying = true
+            self.isPlaying = isNowPlaying
         }
     }
     
     func stop() async {
+        #if os(macOS)
+        let player = ApplicationMusicPlayer.shared
+        player.stop()
+        #else
         let player = MPMusicPlayerController.applicationQueuePlayer
         player.stop()
+        #endif
         await MainActor.run {
             self.isPlaying = false
             self.currentSong = nil
@@ -168,6 +237,7 @@ class MusicKitService: ObservableObject {
     // MARK: - Notifications
     
     private func setupMusicPlayerNotifications() {
+        #if !os(macOS)
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(nowPlayingItemDidChange),
@@ -181,8 +251,10 @@ class MusicKitService: ObservableObject {
             name: .MPMusicPlayerControllerPlaybackStateDidChange,
             object: musicPlayer
         )
+        #endif
     }
     
+    #if !os(macOS)
     @objc private func nowPlayingItemDidChange() {
         Task { @MainActor in
             // Update current song if needed
@@ -195,6 +267,7 @@ class MusicKitService: ObservableObject {
             self.isPlaying = (state == .playing)
         }
     }
+    #endif
     
     deinit {
         NotificationCenter.default.removeObserver(self)

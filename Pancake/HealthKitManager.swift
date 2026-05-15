@@ -208,18 +208,18 @@ final class HealthKitManager: ObservableObject {
         let totalTimeSeconds = workout.duration
         
         guard totalDistanceMeters > 0 && totalTimeSeconds > 0 else {
-            return .easy // Default to easy if we can't calculate pace
+            return .zone2 // Default to aerobic base if we can't calculate pace
         }
         
         let pacePerKm = totalTimeSeconds / (totalDistanceMeters / 1000.0)
         
         // Rough pace-based intensity estimation
         if pacePerKm < 300 { // Under 5:00/km
-            return .hard
+            return .zone4
         } else if pacePerKm < 360 { // Under 6:00/km
-            return .medium
+            return .zone3
         } else {
-            return .easy
+            return .zone2
         }
     }
     

@@ -20,7 +20,7 @@ enum AIUnavailabilityReason: Equatable {
         case .appleIntelligenceNotEnabled:
             return "Apple Intelligence is not enabled. Go to Settings > Apple Intelligence & Siri to enable it."
         case .deviceNotEligible:
-            return "This device does not support Apple Intelligence. AI music features require a compatible iPhone or iPad."
+            return "This device does not support Apple Intelligence. AI music features require a compatible iPhone."
         case .modelNotReady:
             return "The AI model is still downloading. Please try again in a few minutes."
         case .unknown:
@@ -55,10 +55,10 @@ enum MusicAIError: LocalizedError {
 
 @Generable
 struct GenerableMusicSuggestion {
-    @Guide(description: "The exact title of the song only, without the artist name. For example: 'Blinding Lights' not 'Blinding Lights by The Weeknd'")
+    @Guide(description: "The exact title of a real, commercially released song only, without the artist name. Do not invent titles or reuse a real title with the wrong artist. For example: 'Blinding Lights' not 'Blinding Lights by The Weeknd'")
     let songTitle: String
 
-    @Guide(description: "The artist or band name only, separate from the song title")
+    @Guide(description: "The real primary artist or band name only, separate from the song title")
     let artist: String
 
     @Guide(description: "Brief reason why this song fits the workout context (1-2 sentences)")
@@ -258,6 +258,7 @@ final class MusicAIService: ObservableObject {
     func generateMusicSuggestion(
         context: MusicContext,
         userPreferences: MusicPreferences,
+        preferLibrarySelection: Bool? = nil,
         mustUseLibrary: Bool = false,
         avoidedSongs: [MusicSong] = []
     ) async throws -> MusicSuggestion {
@@ -273,7 +274,7 @@ final class MusicAIService: ObservableObject {
         }
 
         // Configurable chance to select from user's library
-        let shouldSelectFromLibrary = mustUseLibrary || Double.random(in: 0...1) < librarySelectionProbability
+        let shouldSelectFromLibrary = mustUseLibrary || (preferLibrarySelection ?? (Double.random(in: 0...1) < librarySelectionProbability))
 
         let prompt = buildMusicSuggestionPrompt(
             context: context,
@@ -305,6 +306,7 @@ final class MusicAIService: ObservableObject {
         workoutPlan: [RunSegment],
         userPreferences: MusicPreferences,
         currentIntensity: Intensity,
+        preferLibrarySelection: Bool? = nil,
         isFartlek: Bool = false,
         mustUseLibrary: Bool = false,
         avoidedSongs: [MusicSong] = []
@@ -321,7 +323,7 @@ final class MusicAIService: ObservableObject {
         }
 
         // Configurable chance to select from user's library
-        let shouldSelectFromLibrary = mustUseLibrary || Double.random(in: 0...1) < librarySelectionProbability
+        let shouldSelectFromLibrary = mustUseLibrary || (preferLibrarySelection ?? (Double.random(in: 0...1) < librarySelectionProbability))
 
         let prompt = buildStartingSongPrompt(
             workoutPlan: workoutPlan,
@@ -357,6 +359,7 @@ final class MusicAIService: ObservableObject {
         currentDistance: Double,
         currentTime: TimeInterval,
         upcomingIntensity: Intensity?,
+        preferLibrarySelection: Bool? = nil,
         isFartlek: Bool = false,
         mustUseLibrary: Bool = false,
         avoidedSongs: [MusicSong] = []
@@ -373,7 +376,7 @@ final class MusicAIService: ObservableObject {
         }
 
         // Configurable chance to select from user's library
-        let shouldSelectFromLibrary = mustUseLibrary || Double.random(in: 0...1) < librarySelectionProbability
+        let shouldSelectFromLibrary = mustUseLibrary || (preferLibrarySelection ?? (Double.random(in: 0...1) < librarySelectionProbability))
 
         let prompt = buildIntervalChangePrompt(
             context: context,
@@ -676,26 +679,34 @@ final class MusicAIService: ObservableObject {
         let tasteProfile = MusicTasteProfileBuilder.build(from: preferences)
         let musicPreferences = tasteProfile.conciseSummary
         let effortMood = getEffortMoodMapping(currentIntensity)
+        let zoneReference = buildHeartRateZoneReference()
+        let discoveryGuidance = buildDiscoveryBalanceGuidance()
 
         let libraryInstruction = if mustUseLibrary {
             """
 
-            CRITICAL PLAYBACK CONSTRAINT: Suggest only a song the runner can realistically play from their local library right now. Use saved favorite songs first. If you are unsure, choose an explicit favorite song or a song by one of the runner's strongest library artists. Do not suggest catalog-only music.
+            CRITICAL PLAYBACK CONSTRAINT: Suggest only a song the runner can realistically play from their local library right now. Choose from saved favorite songs, strong library artists, or other playable library taste signals. Do not suggest catalog-only music. Among playable choices, reject favorites that are weak fits for the target heart-rate zone.
+            CATALOG REALITY REQUIREMENT: Recommend only a real song by the stated artist. Do not invent song titles or pair a real title with the wrong artist.
             """
         } else if preferLibrarySelection {
             """
 
-            IMPORTANT: Prefer a song that exists in my music library. Use my saved favorites first and use any imported playlist only as a taste sample, not as a playback queue.
+            IMPORTANT: Prefer a song that exists in my music library. Use saved favorites as taste evidence, not as an ordered queue, and use any imported playlist only as a taste sample.
+            CATALOG REALITY REQUIREMENT: Recommend only a real, commercially released song. Do not invent song titles or pair a real title with the wrong artist. The app will validate the exact title and primary artist before playback.
             """
         } else {
             """
 
             You can suggest any song that matches my workout context, whether from my library or Apple Music catalog. Use my saved favorites and imported playlist taste sample to steer the choice, but do not treat any playlist as a required queue.
+            CATALOG REALITY REQUIREMENT: Recommend only a real, commercially released Apple Music song by the stated artist. Do not invent song titles or pair a real title with the wrong artist. If using a favorite/listed artist, use a real song from that artist's catalog.
             """
         }
 
         // Build heart rate guidance for starting song
         let heartRateGuidance = buildStartingSongHeartRateGuidance(intensity: currentIntensity)
+
+        // Build energy fit guidance
+        let energyFitGuidance = buildIntensityEnergyFitGuidance(for: currentIntensity)
 
         // Build variety guidance
         let varietyGuidance = buildVarietyGuidance(avoiding: avoidedSongs)
@@ -705,15 +716,15 @@ final class MusicAIService: ObservableObject {
 
         let selectionGoals = """
         - Get me pumped up and ready to run
-        - Match the energy level for a \(currentIntensity.label) effort
+        - Match the energy level for \(currentIntensity.label) (\(currentIntensity.percentDescription))
         - Reflect my strongest taste signals: \(tasteProfile.libraryArtistPrompt) / \(tasteProfile.genrePrompt)
         - Set the perfect tone for my workout
-        - Help me get into my target heart rate zone for \(currentIntensity.label) effort
+        - Help me get into \(currentIntensity.label), the target heart-rate zone for this segment
         - Add variety to keep my playlist fresh and engaging
         """
 
         let fullPrompt = """
-        You are a music curator for running workouts. I am starting an outdoor run. My plan is to \(workoutDescription). My taste profile is \(musicPreferences). Find a motivating song to get me started. With this being a \(currentIntensity.label) effort, make this a \(effortMood) song.\(heartRateGuidance)\(varietyGuidance)\(fartlekGuidance)\(libraryInstruction)
+        You are a music curator for running workouts. I am starting an outdoor run. My plan is to \(workoutDescription). My taste profile is \(musicPreferences). Find a motivating song to get me started. With this being \(currentIntensity.label) (\(currentIntensity.percentDescription), \(currentIntensity.targetDescription)), make this a \(effortMood) song.\(zoneReference)\(heartRateGuidance)\(energyFitGuidance)\(discoveryGuidance)\(varietyGuidance)\(fartlekGuidance)\(libraryInstruction)
 
         Choose a song that will:
         \(selectionGoals)
@@ -721,6 +732,9 @@ final class MusicAIService: ObservableObject {
 
         let guidanceBody = joinedPromptSections([
             heartRateGuidance,
+            zoneReference,
+            energyFitGuidance,
+            discoveryGuidance,
             varietyGuidance,
             fartlekGuidance
         ], fallback: "No special guidance beyond matching the planned starting effort.")
@@ -733,7 +747,8 @@ final class MusicAIService: ObservableObject {
                     body: """
                     Phase: \(WorkoutPhase.starting.displayName)
                     Plan: \(workoutDescription)
-                    Planned intensity: \(currentIntensity.label)
+                    Planned zone: \(currentIntensity.label)
+                    Zone definition: \(currentIntensity.percentDescription), \(currentIntensity.targetDescription)
                     Desired feel: \(effortMood)
                     """
                 ),
@@ -795,6 +810,7 @@ final class MusicAIService: ObservableObject {
         avoidedSongs: [MusicSong] = []
     ) -> MusicPromptPreview {
         let tasteProfile = MusicTasteProfileBuilder.build(from: preferences)
+        let zoneReference = buildHeartRateZoneReference()
         let heartRateInfo = if let current = context.effectiveHeartRate, let target = context.targetHeartRate {
             "My effective heart rate is \(current) BPM (target: \(target) BPM). \(context.heartRateTrend.promptDescription)"
         } else {
@@ -811,26 +827,33 @@ final class MusicAIService: ObservableObject {
         )
 
         let musicPreferences = tasteProfile.conciseSummary
+        let discoveryGuidance = buildDiscoveryBalanceGuidance()
 
         let libraryInstruction = if mustUseLibrary {
             """
 
-            CRITICAL PLAYBACK CONSTRAINT: Suggest only a song the runner can realistically play from their local library right now. Choose from saved favorites, known preferred artists, or strong library taste signals. Do not suggest catalog-only songs.
+            CRITICAL PLAYBACK CONSTRAINT: Suggest only a song the runner can realistically play from their local library right now. Choose from saved favorites, known preferred artists, or strong library taste signals. Do not suggest catalog-only songs. Among playable choices, reject favorites that are weak fits for the target heart-rate zone.
+            CATALOG REALITY REQUIREMENT: Recommend only a real song by the stated artist. Do not invent song titles or pair a real title with the wrong artist.
             """
         } else if preferLibrarySelection {
             """
 
-            IMPORTANT: Prefer a song from my local library. Use my saved favorites first and use imported playlist data only as taste guidance, not as a literal queue.
+            IMPORTANT: Prefer a song from my local library. Use saved favorites as taste evidence, not as an ordered queue, and use imported playlist data only as taste guidance.
+            CATALOG REALITY REQUIREMENT: Recommend only a real, commercially released song. Do not invent song titles or pair a real title with the wrong artist. The app will validate the exact title and primary artist before playback.
             """
         } else {
             """
 
             You can suggest any song that matches my workout context, whether from my library or Apple Music catalog. Use my taste profile as guidance, but do not assume the imported playlist should be played in order.
+            CATALOG REALITY REQUIREMENT: Recommend only a real, commercially released Apple Music song by the stated artist. Do not invent song titles or pair a real title with the wrong artist. If using a favorite/listed artist, use a real song from that artist's catalog.
             """
         }
 
         // Build heart rate zone guidance for interval changes
         let heartRateGuidance = buildHeartRateGuidance(context: context)
+
+        // Build energy fit guidance
+        let energyFitGuidance = buildIntensityEnergyFitGuidance(for: targetIntensity)
 
         // Build variety guidance
         let varietyGuidance = buildVarietyGuidance(avoiding: avoidedSongs)
@@ -843,11 +866,11 @@ final class MusicAIService: ObservableObject {
 
         PRIORITY 1 — MY MUSIC TASTE PROFILE: \(musicPreferences)
 
-        PRIORITY 2 — WORKOUT GOAL: The upcoming effort is \(targetIntensity.label). This is what I WANT to be doing. Choose music that fits this intended effort level.
+        PRIORITY 2 — WORKOUT GOAL: The upcoming target is \(targetIntensity.label) (\(targetIntensity.percentDescription), \(targetIntensity.targetDescription)). This is what I WANT to be doing. Choose music that fits this intended heart-rate zone.
 
-        PRIORITY 3 — CURRENT METRICS: I have run \(String(format: "%.2f", currentDistance)) km in \(currentTime.formattedTime()). \(heartRateInfo). \(effortAnalysis)\(heartRateGuidance)\(varietyGuidance)\(fartlekGuidance)\(libraryInstruction)
+        PRIORITY 3 — CURRENT METRICS: I have run \(String(format: "%.2f", currentDistance)) km in \(currentTime.formattedTime()). \(heartRateInfo). \(effortAnalysis)\(zoneReference)\(heartRateGuidance)\(energyFitGuidance)\(discoveryGuidance)\(varietyGuidance)\(fartlekGuidance)\(libraryInstruction)
 
-        CRITICAL: Choose music that matches the PLANNED \(targetIntensity.label) intensity. If my heart rate doesn't match my goal, use the music to guide me back to the target zone. The song should fit both my taste AND my workout goal. Favor artists like \(tasteProfile.libraryArtistPrompt) when possible.
+        CRITICAL: Choose music that matches the PLANNED \(targetIntensity.label) heart-rate zone. If my heart rate doesn't match my goal, use the music to guide me back to the target zone. The song should fit both my taste AND my workout goal. Use artists like \(tasteProfile.libraryArtistPrompt) as taste anchors, not automatic picks, and do not let artist fit override zone fit.
         """
 
         let metricsBody = joinedPromptSections([
@@ -857,7 +880,10 @@ final class MusicAIService: ObservableObject {
             \(heartRateInfo)
             \(effortAnalysis)
             """,
+            zoneReference,
             heartRateGuidance,
+            energyFitGuidance,
+            discoveryGuidance,
             varietyGuidance,
             fartlekGuidance
         ], fallback: "No live workout metrics available.")
@@ -877,7 +903,8 @@ final class MusicAIService: ObservableObject {
                     title: "Workout Goal",
                     body: """
                     Prompt style: Transition between workout states
-                    Upcoming intensity: \(targetIntensity.label)
+                    Upcoming zone: \(targetIntensity.label)
+                    Zone definition: \(targetIntensity.percentDescription), \(targetIntensity.targetDescription)
                     The music should guide the runner back toward the planned effort, not just mirror their current drift.
                     """
                 ),
@@ -891,7 +918,7 @@ final class MusicAIService: ObservableObject {
                 ),
                 MusicPromptSection(
                     title: "Final Steering Note",
-                    body: "Choose music that fits both the runner's taste and the planned \(targetIntensity.label) effort. Favor artists like \(tasteProfile.libraryArtistPrompt) when possible."
+                    body: "Choose music that fits both the runner's taste and the planned \(targetIntensity.label) heart-rate zone. Use favorite artists as taste anchors, not automatic picks."
                 )
             ],
             fullPrompt: fullPrompt
@@ -922,6 +949,7 @@ final class MusicAIService: ObservableObject {
         avoidedSongs: [MusicSong] = []
     ) -> MusicPromptPreview {
         let tasteProfile = MusicTasteProfileBuilder.build(from: preferences)
+        let zoneReference = buildHeartRateZoneReference()
         let heartRateInfo = if let current = context.effectiveHeartRate, let target = context.targetHeartRate {
             "Current effective heart rate: \(current) BPM, target: \(target) BPM (\(context.heartRateZone.description)). \(context.heartRateTrend.promptDescription)"
         } else {
@@ -944,25 +972,33 @@ final class MusicAIService: ObservableObject {
             ""
         }
 
+        let discoveryGuidance = buildDiscoveryBalanceGuidance()
+
         let libraryInstruction = if mustUseLibrary {
             """
 
-            CRITICAL PLAYBACK CONSTRAINT: Suggest only a song the runner can realistically play from their local library right now. Prefer exact saved favorites or songs by strong preferred library artists. Do not suggest catalog-only tracks.
+            CRITICAL PLAYBACK CONSTRAINT: Suggest only a song the runner can realistically play from their local library right now. Prefer saved favorites, songs by strong preferred library artists, or other playable library taste signals. Do not suggest catalog-only tracks. Among playable choices, reject favorites that are weak fits for the target heart-rate zone.
+            CATALOG REALITY REQUIREMENT: Recommend only a real song by the stated artist. Do not invent song titles or pair a real title with the wrong artist.
             """
         } else if preferLibrarySelection {
             """
 
-            IMPORTANT: Prefer a song that exists in the user's library. Their strongest taste signals are \(tasteProfile.libraryArtistPrompt) with genres \(tasteProfile.genrePrompt). Any imported playlist is only a taste sample.
+            IMPORTANT: Prefer a song that exists in the user's library. Their strongest taste signals are \(tasteProfile.libraryArtistPrompt) with genres \(tasteProfile.genrePrompt). Treat those as taste evidence, not as an ordered queue. Any imported playlist is only a taste sample.
+            CATALOG REALITY REQUIREMENT: Recommend only a real, commercially released song. Do not invent song titles or pair a real title with the wrong artist. The app will validate the exact title and primary artist before playback.
             """
         } else {
             """
 
             You can suggest any song that matches the workout context, whether from their library or Apple Music catalog. Use their saved favorites and imported playlist taste sample as guidance, not as a playback queue.
+            CATALOG REALITY REQUIREMENT: Recommend only a real, commercially released Apple Music song by the stated artist. Do not invent song titles or pair a real title with the wrong artist. If using a favorite/listed artist, use a real song from that artist's catalog.
             """
         }
 
         // Build heart rate zone guidance
         let heartRateGuidance = buildHeartRateGuidance(context: context)
+
+        // Build energy fit guidance
+        let energyFitGuidance = buildIntensityEnergyFitGuidance(for: context.currentIntensity)
 
         // Build variety guidance
         let varietyGuidance = buildVarietyGuidance(avoiding: avoidedSongs)
@@ -981,7 +1017,7 @@ final class MusicAIService: ObservableObject {
         - Preferred mood for \(context.currentIntensity.label): \(preferences.preferredMoodForIntensity[context.currentIntensity]?.displayName ?? "Not set")
 
         PRIORITY 2 — WORKOUT GOAL:
-        - Planned intensity: \(context.currentIntensity.label) — this is what the runner WANTS to be doing
+        - Planned heart-rate zone: \(context.currentIntensity.label) (\(context.currentIntensity.percentDescription), \(context.currentIntensity.targetDescription)) — this is what the runner WANTS to be doing
         - Time remaining in segment: \(Int(context.timeRemainingInSegment)) seconds
 
         PRIORITY 3 — CURRENT METRICS (adapt music to guide runner toward their goal):
@@ -991,9 +1027,9 @@ final class MusicAIService: ObservableObject {
         - User is actively exercising: \(context.isActive ? "Yes" : "No")
         - Current song ending in: \(context.currentSongEndingIn.map { "\(Int($0)) seconds" } ?? "Unknown")
 
-        Recent songs: \(recentSongsText)\(adaptiveGuidance)\(heartRateGuidance)\(varietyGuidance)\(libraryInstruction)
+        Recent songs: \(recentSongsText)\(zoneReference)\(adaptiveGuidance)\(heartRateGuidance)\(energyFitGuidance)\(discoveryGuidance)\(varietyGuidance)\(libraryInstruction)
 
-        CRITICAL: Choose music that matches the PLANNED workout intensity (\(context.currentIntensity.label)). If the runner's heart rate doesn't match their goal, use music to guide them back to the target zone. The song should fit both the runner's taste AND their workout goal.
+        CRITICAL: Choose music that matches the PLANNED heart-rate zone (\(context.currentIntensity.label)). If the runner's heart rate doesn't match their goal, use music to guide them back to the target zone. The song should fit both the runner's taste AND their workout goal. Do not let artist fit override zone fit.
         """
 
         let metricsBody = joinedPromptSections([
@@ -1005,8 +1041,11 @@ final class MusicAIService: ObservableObject {
             Current song ending in: \(context.currentSongEndingIn.map { "\(Int($0)) seconds" } ?? "Unknown")
             Recent songs: \(recentSongsText)
             """,
+            zoneReference,
             adaptiveGuidance,
             heartRateGuidance,
+            energyFitGuidance,
+            discoveryGuidance,
             varietyGuidance
         ], fallback: "No live workout metrics available.")
 
@@ -1025,7 +1064,8 @@ final class MusicAIService: ObservableObject {
                 MusicPromptSection(
                     title: "Workout Goal",
                     body: """
-                    Planned intensity: \(context.currentIntensity.label)
+                    Planned zone: \(context.currentIntensity.label)
+                    Zone definition: \(context.currentIntensity.percentDescription), \(context.currentIntensity.targetDescription)
                     Time remaining in segment: \(Int(context.timeRemainingInSegment)) seconds
                     The music should support the intended effort, even if current metrics have drifted away from it.
                     """
@@ -1040,7 +1080,7 @@ final class MusicAIService: ObservableObject {
                 ),
                 MusicPromptSection(
                     title: "Final Steering Note",
-                    body: "Choose music that matches the planned \(context.currentIntensity.label) effort and use it to guide the runner back toward target if their heart rate has drifted."
+                    body: "Choose music that matches the planned \(context.currentIntensity.label) heart-rate zone and use it to guide the runner back toward target if their heart rate has drifted."
                 )
             ],
             fullPrompt: fullPrompt
@@ -1072,18 +1112,38 @@ final class MusicAIService: ObservableObject {
         return lines[start...end].joined(separator: "\n")
     }
 
+    private func buildHeartRateZoneReference() -> String {
+        let zones = Intensity.allCases
+            .map { "\($0.label): \($0.percentDescription), \($0.targetDescription)" }
+            .joined(separator: "; ")
+
+        return """
+
+        HEART RATE ZONE MODEL: \(zones). These zones are based on percentage of maximum heart rate; use personalized target BPM when available, otherwise treat the BPM ranges as estimates.
+        """
+    }
+
     private func buildAdaptiveMusicGuidance(context: MusicContext) -> String {
-        switch (context.currentIntensity, context.actualWorkoutIntensity) {
-        case (.easy, .vigorous), (.easy, .maximum):
-            return "CRITICAL MISMATCH: The goal is EASY but effective HR is too high (\(context.effectiveHeartRate ?? 0) BPM). They need to slow down NOW. Suggest a calming, slower-tempo song. Do not suggest anything intense or aggressive."
-        case (.medium, .veryLight), (.medium, .light), (.hard, .veryLight), (.hard, .light):
-            return "The runner planned a challenging workout but effective HR is low (\(context.effectiveHeartRate ?? 0) BPM). Suggest an energetic, motivational song to help them move harder."
-        case (.easy, .veryLight), (.easy, .light):
-            return "The runner planned an easy workout and heart rate is below target (\(context.effectiveHeartRate ?? 0) BPM). Suggest a moderately upbeat song to help them pick up the pace gently."
-        case (.easy, .resting):
-            return "The runner planned an easy workout but appears to be resting. Suggest an upbeat song to get them moving."
-        default:
-            return "Actual effort is close to planned effort. Suggest music that maintains this state."
+        let heartRate = context.effectiveHeartRate ?? 0
+
+        switch context.heartRateZone {
+        case .tooHigh:
+            if context.currentIntensity.zoneNumber <= 2 {
+                return "CRITICAL MISMATCH: The goal is \(context.currentIntensity.label), but effective HR is too high (\(heartRate) BPM). They need to ease down now. Suggest calming, lower-arousal music with a relaxed or half-time feel. Prefer chill pop, acoustic, folk, country, soft rock, or mellow alternative. Avoid hype, dance-club, aggressive, anthemic, heavy, or emotionally escalating tracks."
+            }
+            if context.currentIntensity == .zone5 {
+                return "SAFETY MISMATCH: The runner is already above the Zone 5 target. Do not push harder. Choose a driving but controlled track that helps them hold form or back off slightly, not a maximal hype song."
+            }
+            return "The runner is above the planned \(context.currentIntensity.label) target. Choose preference-aligned music that reduces arousal while preserving enough rhythm for safe running form. A calmer, chill, acoustic, or relaxed song can be correct here if it helps bring heart rate down. Avoid maximal hype, aggressive drops, or sprint-finish energy."
+        case .tooLow:
+            if context.currentIntensity.zoneNumber <= 2 {
+                return "The runner is below the planned \(context.currentIntensity.label) target. Suggest gently upbeat, smooth music to lift cadence without turning the segment into high-zone effort."
+            }
+            return "The runner planned \(context.currentIntensity.label) but effective HR is low (\(heartRate) BPM). Suggest a motivating, higher-energy song with a clear beat to help them move toward the target zone."
+        case .perfect, .close:
+            return "Actual effort is close to the planned \(context.currentIntensity.label). Suggest music that maintains this state."
+        case .unknown:
+            return "Heart-rate fit is unknown. Use the planned \(context.currentIntensity.label) as the primary guide."
         }
     }
 
@@ -1182,12 +1242,16 @@ final class MusicAIService: ObservableObject {
 
     private func getEffortMoodMapping(_ intensity: Intensity) -> String {
         switch intensity {
-        case .easy:
-            return "relaxed"
-        case .medium:
-            return "energetic"
-        case .hard:
-            return "high-octane"
+        case .zone1:
+            return "calming recovery"
+        case .zone2:
+            return "relaxed aerobic"
+        case .zone3:
+            return "rhythmic tempo"
+        case .zone4:
+            return "driving threshold"
+        case .zone5:
+            return "controlled peak-effort"
         }
     }
 
@@ -1197,43 +1261,48 @@ final class MusicAIService: ObservableObject {
         currentIntensity: Intensity,
         upcomingIntensity: Intensity?
     ) -> String {
-        guard let current = currentHeartRate, let _ = targetHeartRate else {
+        guard let current = currentHeartRate else {
             return "I need to maintain my current pace"
         }
 
         let intensity = upcomingIntensity ?? currentIntensity
-        let (minHR, maxHR, _) = getHeartRateZone(for: intensity)
+        let (minHR, maxHR, _) = getHeartRateZone(for: intensity, targetHeartRate: targetHeartRate)
 
         if current < minHR {
             let deficit = minHR - current
             if deficit > 20 {
-                return "My heart rate is WAY too low (\(current) BPM) for \(intensity.label) effort (target: \(minHR)-\(maxHR) BPM). I urgently need a high-energy, driving, fast-tempo song to get my heart rate up significantly."
+                return "My heart rate is way below \(intensity.label) (\(current) BPM, target: \(minHR)-\(maxHR) BPM). I need music that lifts effort toward this zone without ignoring safety."
             }
-            return "My heart rate is below target (\(current) BPM) for \(intensity.label) effort (target: \(minHR)-\(maxHR) BPM). I need an energetic, up-tempo song to help increase my heart rate."
+            return "My heart rate is below \(intensity.label) (\(current) BPM, target: \(minHR)-\(maxHR) BPM). I need a more motivating, rhythmic song to help increase effort."
         } else if current > maxHR {
             let excess = current - maxHR
             switch intensity {
-            case .easy:
-                return "My heart rate is \(excess > 15 ? "SIGNIFICANTLY" : "") too high (\(current) BPM) for my EASY effort goal (target: \(minHR)-\(maxHR) BPM). I MUST slow down. Choose a calming, relaxed, slower-tempo song. DO NOT suggest intense, aggressive, heavy metal, or high-energy music — that would push my heart rate even higher when it needs to come DOWN."
-            case .medium:
-                return "My heart rate is above target (\(current) BPM) for medium effort (target: \(minHR)-\(maxHR) BPM). I need a steady, moderate-energy song to help bring my heart rate down slightly. Avoid very intense or aggressive music."
-            case .hard:
-                return "My heart rate is above target (\(current) BPM) for hard effort (target: \(minHR)-\(maxHR) BPM). I need a song that maintains intensity but doesn't push harder. Choose something driving but controlled."
+            case .zone1, .zone2:
+                return "My heart rate is \(excess > 15 ? "significantly" : "") too high (\(current) BPM) for \(intensity.label) (target: \(minHR)-\(maxHR) BPM). I must slow down. Choose calming, relaxed, lower-arousal music. Avoid hype, dance-club, aggressive, heavy, anthemic, or emotionally escalating tracks because they would push my heart rate higher when it needs to come down."
+            case .zone3:
+                return "My heart rate is above \(intensity.label) (\(current) BPM, target: \(minHR)-\(maxHR) BPM). I need preference-aligned music that brings effort down. A calmer, chill, acoustic, or relaxed song can be a good choice here if it helps reduce heart rate while preserving safe running form. Avoid very intense, aggressive, or sprint-finish music."
+            case .zone4:
+                return "My heart rate is above \(intensity.label) (\(current) BPM, target: \(minHR)-\(maxHR) BPM). I need a song that stays driving but controlled, with no extra sprint-finish push."
+            case .zone5:
+                return "My heart rate is above the Zone 5 target (\(current) BPM, target: \(minHR)-\(maxHR) BPM). Do not push harder. Choose controlled intensity that supports form or backing off."
             }
         } else {
-            return "My heart rate is perfect (\(current) BPM) for \(intensity.label) effort (target: \(minHR)-\(maxHR) BPM). Choose a song that maintains this energy level — match the current vibe."
+            return "My heart rate is in \(intensity.label) (\(current) BPM, target: \(minHR)-\(maxHR) BPM). Choose a song that maintains this zone."
         }
     }
 
-    private func getHeartRateZone(for intensity: Intensity) -> (min: Int, max: Int, name: String) {
-        switch intensity {
-        case .easy:
-            return (130, 150, "Easy Zone")
-        case .medium:
-            return (140, 170, "Medium Zone")
-        case .hard:
-            return (160, 185, "Hard Zone")
+    private func getHeartRateZone(for intensity: Intensity, targetHeartRate: Int? = nil) -> (min: Int, max: Int, name: String) {
+        if let targetHeartRate {
+            let range = intensity.percentRange
+            let midpoint = (range.lower + range.upper) / 2
+            let inferredMaxHeartRate = Double(targetHeartRate) / midpoint
+            let minHR = Int((inferredMaxHeartRate * range.lower).rounded())
+            let maxHR = Int((inferredMaxHeartRate * range.upper).rounded())
+            return (minHR, maxHR, intensity.label)
         }
+
+        let range = intensity.defaultHeartRateRange
+        return (range.lowerBound, range.upperBound, intensity.label)
     }
 
     private func buildHeartRateGuidance(context: MusicContext) -> String {
@@ -1241,7 +1310,10 @@ final class MusicAIService: ObservableObject {
             return ""
         }
 
-        let (minHR, maxHR, _) = getHeartRateZone(for: context.currentIntensity)
+        let (minHR, maxHR, _) = getHeartRateZone(
+            for: context.currentIntensity,
+            targetHeartRate: context.targetHeartRate
+        )
 
         if !context.hasStableHeartRateSignal {
             return """
@@ -1253,29 +1325,60 @@ final class MusicAIService: ObservableObject {
         if currentHR < minHR {
             return """
 
-            HEART RATE TOO LOW: Current HR is \(currentHR) BPM, but target for \(context.currentIntensity.label) effort is \(minHR)-\(maxHR) BPM.
-            MUSIC STRATEGY: Choose an energetic, high-tempo, motivating song to help raise heart rate. Driving beats, fast tempo, and high energy are appropriate here.
+            HEART RATE TOO LOW: Current HR is \(currentHR) BPM, but target for \(context.currentIntensity.label) is \(minHR)-\(maxHR) BPM.
+            MUSIC STRATEGY: Choose music that raises effort toward the target zone. For Zone 1-2, lift gently without hype. For Zone 3-5, stronger beats and higher energy are appropriate.
             """
         } else if currentHR > maxHR {
             let excess = currentHR - maxHR
             let urgency = excess > 15 ? "URGENTLY " : ""
             var guidance = """
 
-            HEART RATE TOO HIGH: Current HR is \(currentHR) BPM (\(excess) BPM above target), but the goal is \(context.currentIntensity.label) effort (\(minHR)-\(maxHR) BPM).
+            HEART RATE TOO HIGH: Current HR is \(currentHR) BPM (\(excess) BPM above target), but the goal is \(context.currentIntensity.label) (\(minHR)-\(maxHR) BPM).
             MUSIC STRATEGY: \(urgency)Choose a calmer, relaxed, steady-tempo song to help bring heart rate DOWN.
+            HEART-RATE CORRECTION OVERRIDES DEFAULT ENERGY: If this conflicts with normal \(context.currentIntensity.label) energy guidance, prioritize lowering arousal. A chill, acoustic, relaxed, or lower-energy taste match can be correct when HR is too high, as long as it still supports safe running form.
             """
-            if context.currentIntensity == .easy {
+            if context.currentIntensity.zoneNumber <= 2 {
                 guidance += """
 
-                MANDATORY: Since this is an EASY effort goal, DO NOT suggest intense, aggressive, heavy metal, hard rock, or high-BPM songs. These would push heart rate UP when it needs to come DOWN. Choose chill, relaxed, or moderate-energy music only.
+                MANDATORY: Since this is a low-zone goal, DO NOT suggest intense, aggressive, heavy, hard rock, dance-club, anthemic, or high-arousal songs. These would push heart rate UP when it needs to come DOWN. Choose chill, relaxed, or gently upbeat music only.
                 """
             }
             return guidance
         } else {
             return """
 
-            HEART RATE IN ZONE: Current HR is \(currentHR) BPM — perfect for \(context.currentIntensity.label) effort (target: \(minHR)-\(maxHR) BPM).
+            HEART RATE IN ZONE: Current HR is \(currentHR) BPM — in \(context.currentIntensity.label) (target: \(minHR)-\(maxHR) BPM).
             MUSIC STRATEGY: Match the current energy level to maintain this zone. Don't push harder or calmer — stay steady.
+            """
+        }
+    }
+
+    private func buildIntensityEnergyFitGuidance(for intensity: Intensity) -> String {
+        switch intensity {
+        case .zone1:
+            return """
+
+            ENERGY FIT REQUIREMENT: For Zone 1, choose very low-arousal recovery music with an easy, steady pulse. Soft pop, acoustic, folk, mellow country, ambient-leaning pop, and relaxed grooves are valid. Avoid anything that feels like a push, a dramatic build, a big sing-along anthem, pop-punk, hard-driving pop rock, forceful drums/guitars, shouted choruses, or a "motivational" favorite. A favorite workout song is still a bad Zone 1 pick if it would make the runner speed up or brace for impact.
+            """
+        case .zone2:
+            return """
+
+            ENERGY FIT REQUIREMENT: For Zone 2, choose relaxed or gently upbeat music that still has a stable, runnable groove for easy aerobic running. Low-arousal acoustic, folk, country, soft pop, chill pop, mellow alternative, and smooth pop are valid only when they keep forward motion. Avoid piano ballads, wedding/torch ballads, dramatic vocal showcases, aggressive tracks, heavy tracks, anthems, maximal hype, or songs whose best justification is only "calm" without a usable running pulse. A favorite ballad is still a bad Zone 2 running pick.
+            """
+        case .zone3:
+            return """
+
+            ENERGY FIT REQUIREMENT: For Zone 3 when heart rate is in-zone or below-zone, the song must feel run-ready, rhythmic, and motivating from the first minute, not just powerful at the chorus. Prefer pop, alternative pop, dance pop, pop rock, EDM, or hip-hop with an obvious beat and moderate energy, roughly 105-145 BPM or an obvious double-time/half-time running groove. When HR is in-zone or below-zone, avoid acoustic or piano ballads, sparse singer-songwriter tracks, emotional pop-rock power ballads, slow crescendos, dark minimal tracks, and songs whose best justification is "calming", "beautiful ballad", or "steady tempo" without a driving beat. If HEART RATE TOO HIGH appears above, this default Zone 3 energy target changes: calming, chill, acoustic, or relaxed preference-aligned music can be a good corrective pick to bring HR down. Related-artist exploration must pass the current HR need before novelty counts.
+            """
+        case .zone4:
+            return """
+
+            ENERGY FIT REQUIREMENT: For Zone 4, choose a driving, high-energy track with urgency, strong percussion, or a forceful hook. The song should help sustain threshold work without sounding chaotic. Avoid chill, sleepy, acoustic, ballad, or low-energy mid-tempo tracks that would flatten the workout.
+            """
+        case .zone5:
+            return """
+
+            ENERGY FIT REQUIREMENT: For Zone 5, choose a peak-effort track for short intervals only: intense, explosive, tightly rhythmic, and motivating from the first 30 seconds. Prefer hard-charging pop, EDM, hip-hop, rock, or pop-punk with urgent percussion, high arousal, and a clear drive to sprint. It should push hard while still feeling controlled enough for safe running form. Avoid chill, sleepy, loose, meandering, relaxed indie/electro-funk, mid-tempo "cool groove" songs, or tracks whose best justification is only a bassline.
             """
         }
     }
@@ -1285,8 +1388,15 @@ final class MusicAIService: ObservableObject {
 
         return """
 
-        TARGET HEART RATE ZONE: For \(intensity.label) effort, I need to get into the \(minHR)-\(maxHR) BPM range.
-        MUSIC STRATEGY: Choose a song that will help me gradually build up to my target heart rate zone. The song should match the energy level needed for \(intensity.label) effort.
+        TARGET HEART RATE ZONE: \(intensity.label) is \(intensity.percentDescription). Using the default max-HR estimate, that is roughly \(minHR)-\(maxHR) BPM.
+        MUSIC STRATEGY: Choose a song that will help me gradually settle into \(intensity.label). The song should match the energy level needed for \(intensity.targetDescription).
+        """
+    }
+
+    private func buildDiscoveryBalanceGuidance() -> String {
+        """
+
+        TASTE / EXPLORATION BALANCE: Use favorite artists and favorite songs as taste anchors, not a queue. Across repeated recommendations, exact favorite artists or exact favorite songs should be about 40% of picks; about 60% should explore real related artists or adjacent songs that fit the same taste family. Only choose an exact favorite when it is also one of the best heart-rate-zone fits available. A related artist with better zone fit beats a weaker favorite. If the recent-song avoid list already includes exact favorites or obvious favorite artists, treat the 40% favorite quota as satisfied for this turn and default to a real related artist outside the explicit Favorite Artists list when source constraints allow. Do not rationalize a favorite ballad, slow crescendo, dramatic vocal showcase, workout anthem, or low-groove song as a fit just because the artist appears in the taste profile.
         """
     }
 
@@ -1317,7 +1427,19 @@ final class MusicAIService: ObservableObject {
         Do not repeat any of these songs. Pick a different song.
         """
 
-        if recentUniqueArtists.count <= 2 && !recentUniqueArtists.isEmpty {
+        if suggestionsToAvoid.count >= 2 {
+            guidance += """
+
+            SESSION DISCOVERY: Recent picks already establish the listener's taste. If those picks include exact favorites or artists from the explicit favorite-artist list, treat the 40% favorite quota as already satisfied for this turn. Prefer a real related artist outside the explicit favorite list unless there is no valid heart-rate-zone fit from an adjacent artist. Do not choose another exact favorite merely because it is familiar.
+            """
+        }
+
+        if suggestionsToAvoid.count >= 6 {
+            guidance += """
+
+            VARIETY ESCALATION: The recent-song list is now long, so do not keep mining the obvious favorite-song lane. Prefer a real, workout-appropriate song by a related Apple Music catalog artist outside the recent artists when possible. Use genre adjacency from the saved taste profile to explore, while still validating the exact title and primary artist. If recent picks overuse exact favorites, deliberately choose a related artist with stronger heart-rate-zone fit.
+            """
+        } else if recentUniqueArtists.count <= 2 && !recentUniqueArtists.isEmpty {
             guidance += """
 
             VARIETY: I've been hearing too much from \(recentUniqueArtists.joined(separator: " and ")). Pick a DIFFERENT artist this time — someone new!
@@ -1337,11 +1459,11 @@ final class MusicAIService: ObservableObject {
 
         return """
 
-        FARTLEK INTERVAL WORKOUT: This is a fartlek-style run with rapid alternating intensity changes (hard bursts followed by easy recovery, repeating). The segments switch frequently — some as short as 30 seconds. The effective intensity over the next few minutes is \(effectiveIntensity.label).
+        FARTLEK INTERVAL WORKOUT: This is a fartlek-style run with rapid alternating heart-rate zones, usually high-zone bursts followed by low-zone recovery. The segments switch frequently — some as short as 30 seconds. The effective zone over the next few minutes is \(effectiveIntensity.label).
 
         MUSIC STRATEGY FOR FARTLEK:
-        - Choose a song that sustains energy through repeated hard/easy swings.
-        - Do NOT pick a chill or calming song — even during brief recovery segments, the runner needs to stay mentally engaged for the next hard effort.
+        - Choose a song that sustains energy through repeated high/low zone swings.
+        - Do NOT pick a chill or calming song — even during brief recovery segments, the runner needs to stay mentally engaged for the next high-zone effort.
         - Favor consistently driving, motivating music that works across intensity changes.
         - The song should feel right for both pushing hard AND recovering briefly without feeling out of place during either.
         - Think "workout anthem" energy — songs that keep adrenaline up even during short rest periods.
@@ -1354,7 +1476,7 @@ final class MusicAIService: ObservableObject {
 
         var summaryParts: [String] = []
 
-        for intensity in [Intensity.easy, .medium, .hard] {
+        for intensity in Intensity.allCases {
             if let segments = intensityGroups[intensity], !segments.isEmpty {
                 let totalTime = segments.compactMap { segment in
                     if case .time(let seconds) = segment.target {
@@ -1399,14 +1521,8 @@ final class MusicAIService: ObservableObject {
     }
 
     private func getHeartRateRange(for intensity: Intensity) -> (min: Int, max: Int) {
-        switch intensity {
-        case .easy:
-            return (130, 150)
-        case .medium:
-            return (140, 170)
-        case .hard:
-            return (160, 185)
-        }
+        let range = intensity.defaultHeartRateRange
+        return (range.lowerBound, range.upperBound)
     }
 }
 
@@ -1416,20 +1532,30 @@ extension MusicAIService {
     /// Pre-curated suggestions when AI is unavailable
     static func fallbackSuggestion(for intensity: Intensity) -> MusicSuggestion {
         let suggestions: [Intensity: [MusicSuggestion]] = [
-            .easy: [
-                MusicSuggestion(songTitle: "Walking on Sunshine", artist: "Katrina and the Waves", reason: "Upbeat classic for easy pace", mood: .upbeat, confidence: 0.7),
-                MusicSuggestion(songTitle: "Good Vibrations", artist: "The Beach Boys", reason: "Feel-good vibes for relaxed running", mood: .chill, confidence: 0.7),
-                MusicSuggestion(songTitle: "Here Comes the Sun", artist: "The Beatles", reason: "Gentle energy for easy effort", mood: .chill, confidence: 0.7)
+            .zone1: [
+                MusicSuggestion(songTitle: "Banana Pancakes", artist: "Jack Johnson", reason: "Low-arousal recovery music for Zone 1.", mood: .calming, confidence: 0.7),
+                MusicSuggestion(songTitle: "Here Comes the Sun", artist: "The Beatles", reason: "Gentle, relaxed energy for warm-up or cool-down.", mood: .chill, confidence: 0.7),
+                MusicSuggestion(songTitle: "Better Together", artist: "Jack Johnson", reason: "Soft acoustic pacing that will not push effort upward.", mood: .calming, confidence: 0.7)
             ],
-            .medium: [
-                MusicSuggestion(songTitle: "Can't Stop the Feeling", artist: "Justin Timberlake", reason: "Energetic tempo for steady pace", mood: .energetic, confidence: 0.7),
-                MusicSuggestion(songTitle: "Uptown Funk", artist: "Bruno Mars", reason: "High energy for medium effort", mood: .energetic, confidence: 0.7),
-                MusicSuggestion(songTitle: "Shake It Off", artist: "Taylor Swift", reason: "Fun tempo for moderate running", mood: .upbeat, confidence: 0.7)
+            .zone2: [
+                MusicSuggestion(songTitle: "Good Vibrations", artist: "The Beach Boys", reason: "Feel-good but relaxed energy for aerobic base work.", mood: .chill, confidence: 0.7),
+                MusicSuggestion(songTitle: "Riptide", artist: "Vance Joy", reason: "Gently upbeat acoustic pop for easy endurance.", mood: .upbeat, confidence: 0.7),
+                MusicSuggestion(songTitle: "Budapest", artist: "George Ezra", reason: "Smooth, controlled rhythm for Zone 2 running.", mood: .chill, confidence: 0.7)
             ],
-            .hard: [
-                MusicSuggestion(songTitle: "Lose Yourself", artist: "Eminem", reason: "Intense motivation for hard effort", mood: .intense, confidence: 0.7),
-                MusicSuggestion(songTitle: "Eye of the Tiger", artist: "Survivor", reason: "Classic power song for pushing hard", mood: .motivational, confidence: 0.7),
-                MusicSuggestion(songTitle: "Stronger", artist: "Kanye West", reason: "Driving beat for maximum effort", mood: .intense, confidence: 0.7)
+            .zone3: [
+                MusicSuggestion(songTitle: "Can't Stop the Feeling", artist: "Justin Timberlake", reason: "Run-ready rhythm for steady Zone 3 tempo.", mood: .energetic, confidence: 0.7),
+                MusicSuggestion(songTitle: "Shake It Off", artist: "Taylor Swift", reason: "Upbeat, rhythmic pop for controlled moderate work.", mood: .upbeat, confidence: 0.7),
+                MusicSuggestion(songTitle: "Feel It Still", artist: "Portugal. The Man", reason: "Compact groove that supports a steady tempo.", mood: .energetic, confidence: 0.7)
+            ],
+            .zone4: [
+                MusicSuggestion(songTitle: "Uptown Funk", artist: "Mark Ronson", reason: "Driving, forceful groove for threshold work.", mood: .energetic, confidence: 0.7),
+                MusicSuggestion(songTitle: "Eye of the Tiger", artist: "Survivor", reason: "Classic power song for controlled hard running.", mood: .motivational, confidence: 0.7),
+                MusicSuggestion(songTitle: "Stronger", artist: "Kanye West", reason: "Driving beat for high-zone effort.", mood: .intense, confidence: 0.7)
+            ],
+            .zone5: [
+                MusicSuggestion(songTitle: "Lose Yourself", artist: "Eminem", reason: "Intense motivation for short peak intervals.", mood: .intense, confidence: 0.7),
+                MusicSuggestion(songTitle: "Till I Collapse", artist: "Eminem", reason: "Explosive, controlled intensity for brief Zone 5 work.", mood: .intense, confidence: 0.7),
+                MusicSuggestion(songTitle: "Titanium", artist: "David Guetta", reason: "High-energy peak-effort track with a strong hook.", mood: .intense, confidence: 0.7)
             ]
         ]
         return suggestions[intensity]?.randomElement() ?? MusicSuggestion(
@@ -1449,9 +1575,11 @@ extension MusicAIService {
 
     static func fallbackWorkoutMotivation(for intensity: Intensity) -> String {
         let motivations: [Intensity: [String]] = [
-            .easy: ["Keep that easy pace, you're doing great!", "Nice and steady, saving energy for later!", "Smooth and relaxed, that's the way!"],
-            .medium: ["You're in the zone! Keep pushing!", "Halfway there, stay strong!", "This pace is perfect, maintain it!"],
-            .hard: ["This is where champions are made! Push through!", "Give it everything you've got!", "Dig deep, you're stronger than you think!"]
+            .zone1: ["Recover smooth and stay relaxed.", "Easy breathing, light feet.", "Let the effort come down."],
+            .zone2: ["Stay conversational and steady.", "Smooth aerobic work, right here.", "Keep this easy rhythm."],
+            .zone3: ["Strong tempo, stay controlled.", "Hold this steady effort.", "Rhythm locked, keep moving."],
+            .zone4: ["Threshold work, controlled power.", "Hard but smooth, stay composed.", "Drive the pace with control."],
+            .zone5: ["Short peak effort, strong form.", "Explode, then recover.", "Powerful and controlled now."]
         ]
         return motivations[intensity]?.randomElement() ?? "Keep going, you've got this!"
     }

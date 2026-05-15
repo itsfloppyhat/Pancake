@@ -108,15 +108,15 @@ final class MusicPlaybackManager: ObservableObject {
         }
 
         do {
-            let songs = try await fetchCatalogCandidates(for: suggestion)
-
-            guard let bestMatch = bestCatalogMatch(in: songs, for: suggestion) else {
-                updatePlaybackFailure(MusicError.songUnavailable, state: "song unavailable")
-                return false
-            }
+            let cleanedSuggestion = suggestion.cleanedTitle()
+            let bestMatch = try await bestCatalogSong(for: cleanedSuggestion)
+            let resolvedSuggestion = cleanedSuggestion.resolvedToCatalogTrack(
+                title: bestMatch.title,
+                artist: bestMatch.artistName
+            )
 
             try await MusicKitService.shared.playSong(bestMatch)
-            applyAppleMusicNowPlaying(suggestion: suggestion, duration: bestMatch.duration)
+            applyAppleMusicNowPlaying(suggestion: resolvedSuggestion, duration: bestMatch.duration)
             clearPlaybackFailure()
             return true
         } catch {
@@ -124,6 +124,19 @@ final class MusicPlaybackManager: ObservableObject {
             updatePlaybackFailure(error, state: "apple music playback failed")
             return false
         }
+    }
+
+    func validateAppleMusicSuggestion(_ suggestion: MusicSuggestion) async throws -> MusicSuggestion {
+        guard hasCatalogAccess else {
+            throw MusicError.catalogAccessRequired
+        }
+
+        let cleanedSuggestion = suggestion.cleanedTitle()
+        let bestMatch = try await bestCatalogSong(for: cleanedSuggestion)
+        return cleanedSuggestion.resolvedToCatalogTrack(
+            title: bestMatch.title,
+            artist: bestMatch.artistName
+        )
     }
     
     /// Keep UI in sync after Apple Music starts (same player is observed, but initial state may lag)
@@ -178,6 +191,16 @@ final class MusicPlaybackManager: ObservableObject {
         }
 
         return combinedResults
+    }
+
+    private func bestCatalogSong(for suggestion: MusicSuggestion) async throws -> Song {
+        let songs = try await fetchCatalogCandidates(for: suggestion)
+
+        guard let bestMatch = bestCatalogMatch(in: songs, for: suggestion) else {
+            throw MusicError.songUnavailable
+        }
+
+        return bestMatch
     }
 
     private func clearPlaybackFailure() {

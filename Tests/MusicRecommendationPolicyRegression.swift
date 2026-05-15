@@ -95,7 +95,7 @@ struct MusicRecommendationPolicyRegression {
 
         let fallback = MusicRecommendationPolicy.fallbackSuggestion(
             preferences: preferences,
-            intensity: .medium,
+            intensity: .zone3,
             avoiding: [repeatedSong.sessionSongKey]
         )
 
@@ -111,12 +111,12 @@ struct MusicRecommendationPolicyRegression {
 
         let fallback = MusicRecommendationPolicy.fallbackSuggestion(
             preferences: preferences,
-            intensity: .hard,
+            intensity: .zone4,
             avoiding: []
         )
 
         try assertEqual(fallback?.songTitle, "Playlist Gem", "Imported taste samples should provide a fallback when manual favorites are empty.")
-        try assertEqual(fallback?.mood, .intense, "Fallback mood should track workout intensity.")
+        try assertEqual(fallback?.mood, .motivational, "Fallback mood should track workout intensity.")
     }
 
     private static func testNormalizedSongIdentityCollapsesVariants() throws {

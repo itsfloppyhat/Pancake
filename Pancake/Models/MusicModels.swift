@@ -123,9 +123,11 @@ struct MusicPreferences: Codable, Equatable {
         
         // Set default mood preferences for each intensity
         if self.preferredMoodForIntensity.isEmpty {
-            self.preferredMoodForIntensity[.easy] = .chill
-            self.preferredMoodForIntensity[.medium] = .energetic
-            self.preferredMoodForIntensity[.hard] = .intense
+            self.preferredMoodForIntensity[.zone1] = .calming
+            self.preferredMoodForIntensity[.zone2] = .chill
+            self.preferredMoodForIntensity[.zone3] = .energetic
+            self.preferredMoodForIntensity[.zone4] = .motivational
+            self.preferredMoodForIntensity[.zone5] = .intense
         }
     }
 
@@ -217,7 +219,6 @@ struct MusicContext: Codable {
     }
     
     var actualWorkoutIntensity: WorkoutIntensity {
-        // Determine actual workout intensity based on real-time data
         if !isActive || (currentDistance ?? 0) < 0.01 {
             return .resting
         }
@@ -226,13 +227,14 @@ struct MusicContext: Codable {
             return .unknown
         }
         
-        if heartRate < 100 {
+        let percentOfMax = Double(heartRate) / Double(Intensity.defaultMaxHeartRate)
+        if percentOfMax < 0.50 {
             return .veryLight
-        } else if heartRate < 120 {
+        } else if percentOfMax < 0.60 {
             return .light
-        } else if heartRate < 140 {
+        } else if percentOfMax < 0.70 {
             return .moderate
-        } else if heartRate < 160 {
+        } else if percentOfMax < 0.80 {
             return .vigorous
         } else {
             return .maximum
@@ -244,14 +246,9 @@ struct MusicContext: Codable {
             return false
         }
 
-        // Should we adjust music based on actual vs planned intensity?
-        switch (currentIntensity, actualWorkoutIntensity) {
-        case (.easy, .vigorous), (.easy, .maximum):
-            return true // Easy workout but high intensity - need calming music
-        case (.medium, .veryLight), (.medium, .light), (.hard, .veryLight), (.hard, .light):
-            return true // Hard workout but low intensity - need energizing music
-        case (.easy, .veryLight), (.easy, .light):
-            return true // Easy workout and low intensity - need energizing music
+        switch heartRateZone {
+        case .tooLow, .tooHigh:
+            return true
         default:
             return false
         }
@@ -486,6 +483,22 @@ struct MusicSuggestion: Codable, Identifiable {
         guard cleaned != songTitle else { return self }
 
         return MusicSuggestion(songTitle: cleaned, artist: artist, reason: reason, mood: mood, confidence: confidence)
+    }
+
+    func resolvedToCatalogTrack(title: String, artist: String) -> MusicSuggestion {
+        let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanArtist = artist.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanTitle.isEmpty, !cleanArtist.isEmpty else {
+            return self
+        }
+
+        return MusicSuggestion(
+            songTitle: cleanTitle,
+            artist: cleanArtist,
+            reason: reason,
+            mood: mood,
+            confidence: confidence
+        )
     }
 
     var sessionSongKey: String {

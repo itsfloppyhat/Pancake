@@ -32,7 +32,7 @@ final class MusicDebugViewModel: ObservableObject {
     
     // Madlib parameters
     @Published var selectedWorkoutPhase: WorkoutPhase = .starting
-    @Published var selectedIntensity: Intensity = .medium
+    @Published var selectedIntensity: Intensity = .zone3
     @Published var currentHeartRate: Double = 150
     @Published var currentDistance: Double = 5.0
     @Published var currentTime: Double = 30
@@ -122,10 +122,10 @@ final class MusicDebugViewModel: ObservableObject {
             let testContext = MusicContext(
                 currentHeartRate: 150,
                 guidanceHeartRate: 150,
-                targetHeartRate: 160,
+                targetHeartRate: Intensity.zone3.defaultTargetHeartRate,
                 heartRateTrend: .steady,
                 hasStableHeartRateSignal: true,
-                currentIntensity: .medium,
+                currentIntensity: .zone3,
                 timeRemainingInSegment: 300,
                 currentSongEndingIn: 30,
                 userPreferences: profileManager.userProfile.musicPreferences,
@@ -237,15 +237,7 @@ final class MusicDebugViewModel: ObservableObject {
     // MARK: - Helper Methods for Madlib
 
     private func calculateTargetHeartRate(for intensity: Intensity) -> Int {
-        // Use the same heart rate zones as the AI service
-        switch intensity {
-        case .easy:
-            return 130 // Middle of 100-140 range
-        case .medium:
-            return 140 // Middle of 120-160 range
-        case .hard:
-            return 155 // Middle of 130-180 range
-        }
+        intensity.defaultTargetHeartRate
     }
     
     private func calculateTimeRemainingInSegment() -> TimeInterval {
@@ -267,42 +259,42 @@ final class MusicDebugViewModel: ObservableObject {
     
     func setEasy5KScenario() {
         selectedWorkoutPhase = .midway
-        selectedIntensity = .easy
-        currentHeartRate = 130
+        selectedIntensity = .zone2
+        currentHeartRate = Double(Intensity.zone2.defaultTargetHeartRate)
         currentDistance = 3.0
         currentTime = 25
         preferLibrarySelection = true
-        print("🎯 Set Easy 5K scenario: Easy intensity, 130 BPM, 3km in 25min")
+        print("🎯 Set Zone 2 5K scenario: Zone 2, \(Int(currentHeartRate)) BPM, 3km in 25min")
     }
     
     func setIntervalScenario() {
         selectedWorkoutPhase = .interval
-        selectedIntensity = .hard
-        currentHeartRate = 170
+        selectedIntensity = .zone4
+        currentHeartRate = Double(Intensity.zone4.defaultTargetHeartRate)
         currentDistance = 1.0
         currentTime = 4
         preferLibrarySelection = false
-        print("🎯 Set Interval scenario: Hard intensity, 170 BPM, 1km in 4min")
+        print("🎯 Set Interval scenario: Zone 4, \(Int(currentHeartRate)) BPM, 1km in 4min")
     }
     
     func setFinishStrongScenario() {
         selectedWorkoutPhase = .finishing
-        selectedIntensity = .hard
-        currentHeartRate = 180
+        selectedIntensity = .zone5
+        currentHeartRate = Double(Intensity.zone5.defaultTargetHeartRate)
         currentDistance = 8.0
         currentTime = 45
         preferLibrarySelection = false
-        print("🎯 Set Finish Strong scenario: Hard intensity, 180 BPM, 8km in 45min")
+        print("🎯 Set Finish Strong scenario: Zone 5, \(Int(currentHeartRate)) BPM, 8km in 45min")
     }
     
     func setRecoveryScenario() {
         selectedWorkoutPhase = .recovery
-        selectedIntensity = .easy
-        currentHeartRate = 110
+        selectedIntensity = .zone1
+        currentHeartRate = Double(Intensity.zone1.defaultTargetHeartRate)
         currentDistance = 2.0
         currentTime = 20
         preferLibrarySelection = true
-        print("🎯 Set Recovery scenario: Easy intensity, 110 BPM, 2km in 20min")
+        print("🎯 Set Recovery scenario: Zone 1, \(Int(currentHeartRate)) BPM, 2km in 20min")
     }
     
     // Helper function for timeout handling
@@ -517,9 +509,9 @@ final class MusicDebugViewModel: ObservableObject {
     
     func startTestWorkout() {
         let testSegments = [
-            RunSegment(intensity: .easy, target: .time(seconds: 300)),
-            RunSegment(intensity: .medium, target: .time(seconds: 180)),
-            RunSegment(intensity: .hard, target: .time(seconds: 120))
+            RunSegment(intensity: .zone2, target: .time(seconds: 300)),
+            RunSegment(intensity: .zone3, target: .time(seconds: 180)),
+            RunSegment(intensity: .zone4, target: .time(seconds: 120))
         ]
         
         musicCoordinator.startWorkoutMusic(segments: testSegments)

@@ -7,9 +7,24 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		0175B944FEA52ECF958B5420 /* PromptLabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3560DD32B8FB5ACB8BA163CE /* PromptLabView.swift */; };
+		0279CC0A433F0DFFA813CC10 /* MusicModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6504B2D05B013735C6DA72C5 /* MusicModels.swift */; };
+		0849C92BD6732F18E51BD8B5 /* UserProfileModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F16B8688476DFF789B0E928 /* UserProfileModels.swift */; };
+		0948FC4988DC1805881FC4A9 /* PancakeSongCheckApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 153C9354C4704DD270A3021F /* PancakeSongCheckApp.swift */; };
+		1EF04E0A47382935EAD8BA98 /* PromptLabViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74D800B932097059049E01AE /* PromptLabViewModel.swift */; };
 		317293C72E988B6100AC1FD0 /* MusicKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 317293C62E988B6100AC1FD0 /* MusicKit.framework */; };
 		317293C92E988BB200AC1FD0 /* MusicKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 317293C82E988BB200AC1FD0 /* MusicKit.framework */; };
 		318070132E457E3500EF1C62 /* Pancake Watch Watch App.app in Embed Watch Content */ = {isa = PBXBuildFile; fileRef = 318070092E457E3300EF1C62 /* Pancake Watch Watch App.app */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		384B39DA89DE0ED0ED569131 /* FoundationModels.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = EC4A58A54886BC5A4F280D5D /* FoundationModels.framework */; };
+		4282D838F55C075EAA214218 /* MusicRecommendationPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 474549520EFA9C764CECE5D7 /* MusicRecommendationPolicy.swift */; };
+		58C928E50F741DF17DDA2FCF /* MacMusicPlaybackManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8BE0BFEA09F47FB692B8E4A /* MacMusicPlaybackManager.swift */; };
+		7B70228443AA37DEA2E09571 /* MusicAIService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2027F5E87F69953523BDA0E7 /* MusicAIService.swift */; };
+		965B95725BB9D84AA764CCF5 /* MusicKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 38888310A03E160981AE1B98 /* MusicKit.framework */; };
+		A87AD369480E23DA3FF6F8EC /* MacMusicKitService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B09DE8F442AEF74D7FB093CE /* MacMusicKitService.swift */; };
+		D5667D984E2C0B6807F58667 /* PastelTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C99BB4F87CDE7C869370803 /* PastelTheme.swift */; };
+		E1C51C4A3277EB3F54AE5088 /* RunModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 99CB8E21DA83B254B16E387B /* RunModels.swift */; };
+		EACE83DDD47DB3EF1694D3F2 /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 700BBD1D95FE2F882CEAD023 /* Cocoa.framework */; };
+		FCEEC8675DCC86A14F484902 /* MacUserProfileManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A6461565D22471EE954556D /* MacUserProfileManager.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -37,10 +52,26 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		0A6461565D22471EE954556D /* MacUserProfileManager.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = MacUserProfileManager.swift; path = PancakeMac/MacUserProfileManager.swift; sourceTree = "<group>"; };
+		0F16B8688476DFF789B0E928 /* UserProfileModels.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = UserProfileModels.swift; path = Pancake/Models/UserProfileModels.swift; sourceTree = "<group>"; };
+		153C9354C4704DD270A3021F /* PancakeSongCheckApp.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = PancakeSongCheckApp.swift; path = PancakeMac/PancakeSongCheckApp.swift; sourceTree = "<group>"; };
+		2027F5E87F69953523BDA0E7 /* MusicAIService.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = MusicAIService.swift; path = Pancake/Services/MusicAIService.swift; sourceTree = "<group>"; };
 		317293C62E988B6100AC1FD0 /* MusicKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = MusicKit.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS26.0.sdk/System/Library/Frameworks/MusicKit.framework; sourceTree = DEVELOPER_DIR; };
 		317293C82E988BB200AC1FD0 /* MusicKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = MusicKit.framework; path = Platforms/WatchOS.platform/Developer/SDKs/WatchOS26.0.sdk/System/Library/Frameworks/MusicKit.framework; sourceTree = DEVELOPER_DIR; };
 		31806FF32E457A0D00EF1C62 /* Pancake.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Pancake.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		318070092E457E3300EF1C62 /* Pancake Watch Watch App.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Pancake Watch Watch App.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		3560DD32B8FB5ACB8BA163CE /* PromptLabView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = PromptLabView.swift; path = Pancake/PromptLabView.swift; sourceTree = "<group>"; };
+		38888310A03E160981AE1B98 /* MusicKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = MusicKit.framework; path = System/Library/Frameworks/MusicKit.framework; sourceTree = SDKROOT; };
+		474549520EFA9C764CECE5D7 /* MusicRecommendationPolicy.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = MusicRecommendationPolicy.swift; path = Pancake/MusicRecommendationPolicy.swift; sourceTree = "<group>"; };
+		6504B2D05B013735C6DA72C5 /* MusicModels.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = MusicModels.swift; path = Pancake/Models/MusicModels.swift; sourceTree = "<group>"; };
+		700BBD1D95FE2F882CEAD023 /* Cocoa.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Cocoa.framework; path = Platforms/MacOSX.platform/Developer/SDKs/MacOSX15.0.sdk/System/Library/Frameworks/Cocoa.framework; sourceTree = DEVELOPER_DIR; };
+		74D800B932097059049E01AE /* PromptLabViewModel.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = PromptLabViewModel.swift; path = Pancake/ViewModels/PromptLabViewModel.swift; sourceTree = "<group>"; };
+		99CB8E21DA83B254B16E387B /* RunModels.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = RunModels.swift; path = Pancake/Models/RunModels.swift; sourceTree = "<group>"; };
+		9C99BB4F87CDE7C869370803 /* PastelTheme.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = PastelTheme.swift; path = Pancake/PastelTheme.swift; sourceTree = "<group>"; };
+		B09DE8F442AEF74D7FB093CE /* MacMusicKitService.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = MacMusicKitService.swift; path = PancakeMac/MacMusicKitService.swift; sourceTree = "<group>"; };
+		D57631F030179B3368A54E4C /* Pancake Song Check.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Pancake Song Check.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		EC4A58A54886BC5A4F280D5D /* FoundationModels.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = FoundationModels.framework; path = System/Library/Frameworks/FoundationModels.framework; sourceTree = SDKROOT; };
+		F8BE0BFEA09F47FB692B8E4A /* MacMusicPlaybackManager.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = MacMusicPlaybackManager.swift; path = PancakeMac/MacMusicPlaybackManager.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -64,6 +95,8 @@
 		};
 		3180700A2E457E3300EF1C62 /* Pancake Watch Watch App */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+			);
 			path = "Pancake Watch Watch App";
 			sourceTree = "<group>";
 		};
@@ -86,14 +119,43 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		CCD6DD579BFED36CE2F48C16 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				EACE83DDD47DB3EF1694D3F2 /* Cocoa.framework in Frameworks */,
+				965B95725BB9D84AA764CCF5 /* MusicKit.framework in Frameworks */,
+				384B39DA89DE0ED0ED569131 /* FoundationModels.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		159B9300A3C8654A6BD2F135 /* PancakeMac */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			name = PancakeMac;
+			path = PancakeMac;
+			sourceTree = "<group>";
+		};
+		19E8204753F4B3E4FC7B60DB /* OS X */ = {
+			isa = PBXGroup;
+			children = (
+				700BBD1D95FE2F882CEAD023 /* Cocoa.framework */,
+			);
+			name = "OS X";
+			sourceTree = "<group>";
+		};
 		317293C52E988B6000AC1FD0 /* Frameworks */ = {
 			isa = PBXGroup;
 			children = (
 				317293C82E988BB200AC1FD0 /* MusicKit.framework */,
 				317293C62E988B6100AC1FD0 /* MusicKit.framework */,
+				19E8204753F4B3E4FC7B60DB /* OS X */,
+				38888310A03E160981AE1B98 /* MusicKit.framework */,
+				EC4A58A54886BC5A4F280D5D /* FoundationModels.framework */,
 			);
 			name = Frameworks;
 			sourceTree = "<group>";
@@ -105,6 +167,8 @@
 				3180700A2E457E3300EF1C62 /* Pancake Watch Watch App */,
 				317293C52E988B6000AC1FD0 /* Frameworks */,
 				31806FF42E457A0D00EF1C62 /* Products */,
+				159B9300A3C8654A6BD2F135 /* PancakeMac */,
+				BF0B2BE8354CBD9DC51CB9C4 /* Pancake Song Check Shared */,
 			);
 			sourceTree = "<group>";
 		};
@@ -113,8 +177,28 @@
 			children = (
 				31806FF32E457A0D00EF1C62 /* Pancake.app */,
 				318070092E457E3300EF1C62 /* Pancake Watch Watch App.app */,
+				D57631F030179B3368A54E4C /* Pancake Song Check.app */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		BF0B2BE8354CBD9DC51CB9C4 /* Pancake Song Check Shared */ = {
+			isa = PBXGroup;
+			children = (
+				153C9354C4704DD270A3021F /* PancakeSongCheckApp.swift */,
+				0A6461565D22471EE954556D /* MacUserProfileManager.swift */,
+				B09DE8F442AEF74D7FB093CE /* MacMusicKitService.swift */,
+				F8BE0BFEA09F47FB692B8E4A /* MacMusicPlaybackManager.swift */,
+				99CB8E21DA83B254B16E387B /* RunModels.swift */,
+				6504B2D05B013735C6DA72C5 /* MusicModels.swift */,
+				0F16B8688476DFF789B0E928 /* UserProfileModels.swift */,
+				9C99BB4F87CDE7C869370803 /* PastelTheme.swift */,
+				474549520EFA9C764CECE5D7 /* MusicRecommendationPolicy.swift */,
+				2027F5E87F69953523BDA0E7 /* MusicAIService.swift */,
+				3560DD32B8FB5ACB8BA163CE /* PromptLabView.swift */,
+				74D800B932097059049E01AE /* PromptLabViewModel.swift */,
+			);
+			name = "Pancake Song Check Shared";
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -138,8 +222,6 @@
 				31806FF52E457A0D00EF1C62 /* Pancake */,
 			);
 			name = Pancake;
-			packageProductDependencies = (
-			);
 			productName = Pancake;
 			productReference = 31806FF32E457A0D00EF1C62 /* Pancake.app */;
 			productType = "com.apple.product-type.application";
@@ -160,10 +242,25 @@
 				3180700A2E457E3300EF1C62 /* Pancake Watch Watch App */,
 			);
 			name = "Pancake Watch Watch App";
-			packageProductDependencies = (
-			);
 			productName = "Pancake Watch Watch App";
 			productReference = 318070092E457E3300EF1C62 /* Pancake Watch Watch App.app */;
+			productType = "com.apple.product-type.application";
+		};
+		A8FE94067081E69187076BA1 /* Pancake Song Check */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 4A53058B3F3495A4848A20F1 /* Build configuration list for PBXNativeTarget "Pancake Song Check" */;
+			buildPhases = (
+				C73300AA6691C609F65485C1 /* Sources */,
+				CCD6DD579BFED36CE2F48C16 /* Frameworks */,
+				172C66993F1F6C0D2D740120 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = "Pancake Song Check";
+			productName = "Pancake Song Check";
+			productReference = D57631F030179B3368A54E4C /* Pancake Song Check.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
@@ -178,9 +275,22 @@
 				TargetAttributes = {
 					31806FF22E457A0D00EF1C62 = {
 						CreatedOnToolsVersion = 16.4;
+						SystemCapabilities = {
+							com.apple.HealthKit = {
+								enabled = 1;
+							};
+							com.apple.SignInWithApple = {
+								enabled = 1;
+							};
+						};
 					};
 					318070082E457E3300EF1C62 = {
 						CreatedOnToolsVersion = 16.4;
+						SystemCapabilities = {
+							com.apple.HealthKit = {
+								enabled = 1;
+							};
+						};
 					};
 				};
 			};
@@ -200,11 +310,19 @@
 			targets = (
 				31806FF22E457A0D00EF1C62 /* Pancake */,
 				318070082E457E3300EF1C62 /* Pancake Watch Watch App */,
+				A8FE94067081E69187076BA1 /* Pancake Song Check */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		172C66993F1F6C0D2D740120 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		31806FF12E457A0D00EF1C62 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -233,6 +351,25 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		C73300AA6691C609F65485C1 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				0948FC4988DC1805881FC4A9 /* PancakeSongCheckApp.swift in Sources */,
+				FCEEC8675DCC86A14F484902 /* MacUserProfileManager.swift in Sources */,
+				A87AD369480E23DA3FF6F8EC /* MacMusicKitService.swift in Sources */,
+				58C928E50F741DF17DDA2FCF /* MacMusicPlaybackManager.swift in Sources */,
+				E1C51C4A3277EB3F54AE5088 /* RunModels.swift in Sources */,
+				0279CC0A433F0DFFA813CC10 /* MusicModels.swift in Sources */,
+				0849C92BD6732F18E51BD8B5 /* UserProfileModels.swift in Sources */,
+				D5667D984E2C0B6807F58667 /* PastelTheme.swift in Sources */,
+				4282D838F55C075EAA214218 /* MusicRecommendationPolicy.swift in Sources */,
+				7B70228443AA37DEA2E09571 /* MusicAIService.swift in Sources */,
+				0175B944FEA52ECF958B5420 /* PromptLabView.swift in Sources */,
+				1EF04E0A47382935EAD8BA98 /* PromptLabViewModel.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -417,7 +554,7 @@
 				SUPPORTS_MACCATALYST = NO;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
+				TARGETED_DEVICE_FAMILY = 1;
 				XROS_DEPLOYMENT_TARGET = 2.5;
 			};
 			name = Debug;
@@ -472,7 +609,7 @@
 				SUPPORTS_MACCATALYST = NO;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
+				TARGETED_DEVICE_FAMILY = 1;
 				XROS_DEPLOYMENT_TARGET = 2.5;
 			};
 			name = Release;
@@ -544,6 +681,79 @@
 			};
 			name = Release;
 		};
+		5761AB18EAEEA889F5E20454 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = PancakeMac/PancakeSongCheck.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
+				DEVELOPMENT_TEAM = FYWW2S89N3;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "Pancake Song Check";
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.music";
+				INFOPLIST_KEY_NSAppleMusicUsageDescription = "Pancake Song Check uses Apple Music to search and play generated song suggestions.";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "com.Matthew-Lucas.Hello-World.Pancake.SongCheck";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		A63B9B7579AC1AC87FAB6802 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = PancakeMac/PancakeSongCheck.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
+				DEVELOPMENT_TEAM = FYWW2S89N3;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "Pancake Song Check";
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.music";
+				INFOPLIST_KEY_NSAppleMusicUsageDescription = "Pancake Song Check uses Apple Music to search and play generated song suggestions.";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "com.Matthew-Lucas.Hello-World.Pancake.SongCheck";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -570,6 +780,15 @@
 			buildConfigurations = (
 				318070152E457E3500EF1C62 /* Debug */,
 				318070162E457E3500EF1C62 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		4A53058B3F3495A4848A20F1 /* Build configuration list for PBXNativeTarget "Pancake Song Check" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				5761AB18EAEEA889F5E20454 /* Release */,
+				A63B9B7579AC1AC87FAB6802 /* Debug */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
