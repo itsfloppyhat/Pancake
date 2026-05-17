@@ -1,6 +1,6 @@
 # Pancake App Store Submission Notes
 
-Last updated: April 27, 2026
+Last updated: May 17, 2026
 
 ## Product Positioning
 
@@ -41,6 +41,7 @@ If you add crash reporting, analytics, cloud sync, push-backed friend activity, 
 Pancake pairs with Apple Watch for guided runs.
 
 - The guided workout experience is driven from the watch during a run.
+- The iPhone app keeps the display awake only while a run is active and turns that behavior off when the run completes.
 - Apple Music access is optional but recommended for taste import and catalog playback.
 - The iPhone includes a Song Check screen in Profile so the reviewer can generate and play a song without starting a workout outdoors.
 - If Apple Music playback is not authorized, Pancake can still work with library-only suggestions when local music is available.
@@ -50,7 +51,7 @@ Pancake pairs with Apple Watch for guided runs.
 
 - Verify Apple Music library import on a real device.
 - Verify Apple Music catalog playback on a real device.
-- Verify a full watch-guided run with the iPhone screen locked.
+- Verify a full watch-guided run with the iPhone kept awake during the active run.
 - Verify permission prompts are understandable and only requested when needed.
 - Verify Sign in with Apple entitlement and developer portal capability are enabled.
 - Verify notification permission and spoken comment playback on a real device.

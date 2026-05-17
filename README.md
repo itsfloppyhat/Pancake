@@ -1,6 +1,6 @@
 # Pancake
 
-Pancake is an iPhone + Apple Watch running assistant that picks the next song for a run based on the runner's music taste, workout plan, current segment intensity, and live effort signals like heart rate. It is built as a real iOS product, not a demo shell: it uses SwiftUI, WatchConnectivity, HealthKit, CoreLocation, MusicKit, MediaPlayer, Foundation Models, local persistence, background audio, and a first-run onboarding flow.
+Pancake is an iPhone + Apple Watch running assistant that picks the next song for a run based on the runner's music taste, workout plan, current segment intensity, and live effort signals like heart rate. It is built as a real iOS product, not a demo shell: it uses SwiftUI, WatchConnectivity, HealthKit, CoreLocation, MusicKit, MediaPlayer, Foundation Models, local persistence, active-run idle-timer control, and a first-run onboarding flow.
 
 The core product idea is simple: runners should not have to manage a playlist mid-run. Pancake learns what they like, watches what the run is asking of them, and keeps music moving toward the intended effort.
 
@@ -11,7 +11,7 @@ The core product idea is simple: runners should not have to manage a playlist mi
 - Apple Music taste setup that imports artists, songs, genres, and playlist samples as preference signals, not as a fixed playback queue.
 - Deterministic no-repeat protection during a run, including normalized title/artist matching across model output and actual playback metadata.
 - Prefetched next-song pipeline for low-latency manual song rejection from the watch.
-- Background-audio support and durable WatchConnectivity fallbacks for locked-phone runs.
+- Scoped idle-timer control during active runs and durable WatchConnectivity fallbacks for phone-to-watch coordination.
 - First-run onboarding that walks through account, Health, Location, Music, Song Check, and Watch setup.
 - Sign in with Apple state validation that handles revoked credentials instead of trusting stale local flags.
 
@@ -36,7 +36,7 @@ flowchart TD
     Taste --> Playback
 ```
 
-Pancake is intentionally coordinator-driven. The watch owns the workout experience, while the iPhone owns song generation and playback. That separation keeps watchOS lightweight and lets the phone handle Foundation Models, Apple Music catalog search, MediaPlayer queues, and background audio.
+Pancake is intentionally coordinator-driven. The watch owns the workout experience, while the iPhone owns song generation and playback. That separation keeps watchOS lightweight and lets the phone handle Foundation Models, Apple Music catalog search, MediaPlayer queues, and active-run playback.
 
 ## Tech Stack
 
@@ -135,7 +135,7 @@ Why it is strong: App Store builds cannot treat a persisted boolean as authentic
 5. Use Song Check to generate and play a song before running.
 6. Plan a run on iPhone.
 7. Start the workout on Apple Watch.
-8. Pancake generates songs, avoids repeats, adapts to effort, and keeps playback running with the phone locked.
+8. Pancake generates songs, avoids repeats, adapts to effort, and keeps the iPhone display awake while the run is active.
 
 ## Project Structure
 
@@ -188,7 +188,7 @@ xcodebuild \
   ENABLE_PREVIEWS=NO
 ```
 
-For full manual testing, install on a real iPhone and Apple Watch. Simulator testing is useful for UI review, but HealthKit, MusicKit playback, watch reachability, background audio, and Apple Music authorization need device validation.
+For full manual testing, install on a real iPhone and Apple Watch. Simulator testing is useful for UI review, but HealthKit, MusicKit playback, watch reachability, active-run idle-timer behavior, and Apple Music authorization need device validation.
 
 ## Testing
 
@@ -214,7 +214,7 @@ Implemented:
 - watch-driven run control
 - generated playback
 - no-repeat song protection
-- background audio hardening
+- active-run idle-timer control
 - Sign in with Apple credential validation
 
 Intentionally hidden for beta:

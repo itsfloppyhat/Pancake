@@ -1,5 +1,8 @@
 import Foundation
 import Combine
+#if canImport(UIKit)
+import UIKit
+#endif
 
 // MARK: - Workout Music Coordinator
 @MainActor
@@ -193,6 +196,7 @@ final class WorkoutMusicCoordinator: ObservableObject {
         }
 
         isWorkoutActive = true
+        setIdleTimerDisabled(true)
         musicManager.coordinatorDriven = true
 
         // Start time-series recording
@@ -262,6 +266,7 @@ final class WorkoutMusicCoordinator: ObservableObject {
         closeFinalSongPeriod()
 
         isWorkoutActive = false
+        setIdleTimerDisabled(false)
         musicManager.coordinatorDriven = false
         currentWorkoutContext = nil
         prefetchedSuggestions.removeAll()
@@ -947,6 +952,12 @@ final class WorkoutMusicCoordinator: ObservableObject {
         default:
             break
         }
+    }
+
+    private func setIdleTimerDisabled(_ isDisabled: Bool) {
+        #if canImport(UIKit)
+        UIApplication.shared.isIdleTimerDisabled = isDisabled
+        #endif
     }
 
     /// Handles workout control messages keyed by "type" (sent by the Watch).

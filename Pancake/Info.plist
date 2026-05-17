@@ -8,9 +8,5 @@
 	<string>Pancake uses Apple Music to learn your taste from your library and playlists, and to play generated song suggestions during your runs.</string>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
-	<key>UIBackgroundModes</key>
-	<array>
-		<string>audio</string>
-	</array>
 </dict>
 </plist>
