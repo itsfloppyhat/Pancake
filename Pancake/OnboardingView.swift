@@ -332,7 +332,7 @@ private struct OnboardingPermissionRow: View {
                 Image(systemName: "checkmark.circle.fill")
                     .foregroundColor(.pastelMint)
             } else {
-                Button("Enable", action: action)
+                Button("Continue", action: action)
                     .buttonStyle(BubblySmallButtonStyle(backgroundColor: .pastelPeriwinkle))
             }
         }

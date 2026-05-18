@@ -105,7 +105,7 @@ private struct SocialSetupCard: View {
                 )
 
                 if !socialManager.notificationsAuthorized {
-                    Button("Enable") {
+                    Button("Continue") {
                         Task {
                             await socialManager.requestNotificationAuthorization()
                         }

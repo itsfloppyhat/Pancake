@@ -127,7 +127,7 @@ struct PromptLabView: View {
                 title: "Apple Music Playback",
                 subtitle: viewModel.isCatalogAuthorized ? "Catalog playback is ready." : "Needed to force the Apple Music playback path.",
                 isConnected: viewModel.isCatalogAuthorized,
-                buttonTitle: "Enable"
+                buttonTitle: "Continue"
             ) {
                 Task {
                     await viewModel.requestCatalogAuthorization()

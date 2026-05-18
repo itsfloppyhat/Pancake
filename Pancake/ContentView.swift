@@ -182,7 +182,7 @@ struct PermissionCardView: View {
                                 .scaleEffect(0.8)
                                 .foregroundColor(.white)
                         }
-                        Text(isRequesting ? "Requesting..." : "Grant Permission")
+                        Text(isRequesting ? "Requesting..." : "Continue")
                             .font(.subheadline)
                             .fontWeight(.medium)
                             .foregroundStyle(.white)

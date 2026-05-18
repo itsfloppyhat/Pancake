@@ -229,7 +229,7 @@ struct MusicAuthorizationView: View {
                 title: "Library Taste Import",
                 subtitle: viewModel.isLibraryAuthorized ? "Ready to import playlists, artists, songs, and genres" : "Not enabled",
                 isConnected: viewModel.isLibraryAuthorized,
-                actionTitle: "Connect Library"
+                actionTitle: "Continue"
             ) {
                 viewModel.requestMusicAuthorization()
             }
@@ -239,7 +239,7 @@ struct MusicAuthorizationView: View {
                 title: "Apple Music Playback",
                 subtitle: viewModel.isCatalogAuthorized ? "Ready to play generated songs outside your library" : "Not enabled",
                 isConnected: viewModel.isCatalogAuthorized,
-                actionTitle: "Enable Playback"
+                actionTitle: "Continue"
             ) {
                 Task {
                     await viewModel.requestCatalogAuthorization()
