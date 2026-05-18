@@ -6,7 +6,7 @@ Pancake is an iPhone and Apple Watch running app for planning structured runs, f
 
 For support questions, bug reports, or App Store review follow-up, contact:
 
-- Email: matthewlucas.dev@gmail.com
+- Email: matthewlucascodes@gmail.com
 - GitHub issues: https://github.com/itsfloppyhat/Pancake/issues
 
 When requesting support, include your device model, iOS or watchOS version, Pancake app version, and a short description of what happened.
