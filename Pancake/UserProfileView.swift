@@ -1251,7 +1251,7 @@ struct HealthKitImportSectionView: View {
                         .font(.headline)
                         .foregroundColor(.primary)
                     
-                    Text(historyViewModel.isHealthKitAuthorized ? "Import running history" : "Authorize HealthKit access")
+                    Text(historyViewModel.isHealthKitAuthorized ? "Import running history" : "Health access for running history")
                         .font(.subheadline)
                         .foregroundColor(.secondary)
                 }
@@ -1269,7 +1269,7 @@ struct HealthKitImportSectionView: View {
                             historyViewModel.requestHealthKitAuthorization()
                         }
                     }) {
-                        Text(historyViewModel.isHealthKitAuthorized ? "Import" : "Authorize")
+                        Text(historyViewModel.isHealthKitAuthorized ? "Import" : "Continue")
                             .font(.subheadline)
                             .fontWeight(.medium)
                             .foregroundColor(.white)
