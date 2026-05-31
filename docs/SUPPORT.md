@@ -1,6 +1,6 @@
 # Pancake Support
 
-Pancake is an iPhone and Apple Watch running app for planning structured runs, following guided workout segments on Apple Watch, and using Apple Music context for workout-ready song ideas.
+Pancake is an iPhone running app with a watch companion for planning structured runs, following guided workout segments, and optionally starting an Adaptive Mix shaped by live running metrics.
 
 ## Get Help
 
@@ -13,7 +13,12 @@ When requesting support, include your device model, iOS or watchOS version, Panc
 
 ## Permissions
 
-Pancake may ask for Health, Location, and Apple Music access so it can guide outdoor runs and provide music context. You can change these permissions at any time in the Settings app.
+- Health access on the watch companion is requested after you tap Continue and is used to save workouts and show live metrics.
+- Location access on the watch companion is requested when you start an outdoor workout and is used for distance and pace.
+- Health history import on iPhone is optional.
+- Apple Music library import and playback access are optional.
+
+You can change these permissions at any time in Settings.
 
 ## Privacy
 
