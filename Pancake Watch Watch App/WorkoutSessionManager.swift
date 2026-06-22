@@ -5,6 +5,25 @@ import CoreMotion
 import WatchConnectivity
 import WatchKit
 
+private enum WatchAdaptiveMixPolicy {
+    static let upcomingIntervalLeadTime: TimeInterval = 10
+
+    static func shouldPrecurateUpcomingInterval(
+        estimatedSecondsRemaining: TimeInterval?,
+        hasUpcomingInterval: Bool,
+        alreadyPrecurated: Bool
+    ) -> Bool {
+        guard hasUpcomingInterval,
+              !alreadyPrecurated,
+              let estimatedSecondsRemaining else {
+            return false
+        }
+
+        return estimatedSecondsRemaining > 0 &&
+            estimatedSecondsRemaining <= upcomingIntervalLeadTime
+    }
+}
+
 // MARK: - GPS Status
 enum GPSStatus: String, CaseIterable {
     case unknown = "unknown"
@@ -72,7 +91,7 @@ enum WorkoutError: LocalizedError {
         case .noSegments:
             return "No workout segments planned"
         case .healthKitUnavailable:
-            return "HealthKit is not available on this device"
+            return "Health data is not available on this device"
         case .locationDenied:
             return "Location access is required for outdoor workouts"
         }
@@ -144,6 +163,7 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
     // MARK: - Segment Tracking
     private var segmentStartTime: Date?
     private var segmentStartDistance: Double = 0
+    private var lastPrecuratedUpcomingSegmentIndex: Int?
 
     private override init() {
         super.init()
@@ -219,6 +239,7 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
             // Initialize segment tracking
             self.segmentStartTime = Date()
             self.segmentStartDistance = 0
+            self.lastPrecuratedUpcomingSegmentIndex = nil
 
             // Clear any previous errors
             self.error = nil
@@ -375,6 +396,9 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
                 guard let self = self, let startDate = self.workoutStartDate else { return }
                 self.totalTime = Date().timeIntervalSince(startDate)
 
+                // Give the iPhone time to refresh the next-song queue before an interval changes.
+                self.checkForUpcomingIntervalCuration()
+
                 // Check for segment completion
                 self.checkForSegmentCompletion()
 
@@ -415,6 +439,46 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
             }
         }
     }
+
+    private func checkForUpcomingIntervalCuration() {
+        let upcomingSegmentIndex = currentSegmentIndex + 1
+        let alreadyPrecurated = lastPrecuratedUpcomingSegmentIndex == upcomingSegmentIndex
+        let hasUpcomingInterval = upcomingSegmentIndex < plannedSegments.count
+
+        guard WatchAdaptiveMixPolicy.shouldPrecurateUpcomingInterval(
+            estimatedSecondsRemaining: estimatedSecondsUntilCurrentSegmentEnds,
+            hasUpcomingInterval: hasUpcomingInterval,
+            alreadyPrecurated: alreadyPrecurated
+        ) else {
+            return
+        }
+
+        lastPrecuratedUpcomingSegmentIndex = upcomingSegmentIndex
+        sendWorkoutSnapshotToiPhone(
+            reason: "upcoming interval curation",
+            adaptiveMixCurationTargetSegmentIndex: upcomingSegmentIndex
+        )
+    }
+
+    private var estimatedSecondsUntilCurrentSegmentEnds: TimeInterval? {
+        guard let currentSegment else { return nil }
+
+        switch currentSegment.target {
+        case .time(let seconds):
+            guard let segmentStartTime else { return nil }
+            return max(0, TimeInterval(seconds) - Date().timeIntervalSince(segmentStartTime))
+        case .distance(let meters):
+            guard let segmentStartTime else { return nil }
+
+            let elapsed = Date().timeIntervalSince(segmentStartTime)
+            let coveredMeters = max(0, distanceMeters - segmentStartDistance)
+            guard elapsed > 0, coveredMeters > 0 else { return nil }
+
+            let metersPerSecond = coveredMeters / elapsed
+            let remainingMeters = max(0, Double(meters) - coveredMeters)
+            return remainingMeters / metersPerSecond
+        }
+    }
     
     private func checkForKmMilestone() {
         let currentKm = Int(displayedDistanceKm)
@@ -441,7 +505,7 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
               lastHeartRateSampleAt == nil,
               workoutDuration >= Self.heartRateSignalGracePeriod else { return }
 
-        liveMetricsWarning = "No heart-rate signal yet. Music is using your run plan and segment intensity until Apple Watch heart-rate data starts."
+        liveMetricsWarning = "No heart-rate signal yet. Music is using your run plan and segment intensity until watch heart-rate data starts."
 
         guard !hasSentHeartRateWarningToPhone else { return }
         hasSentHeartRateWarningToPhone = true
@@ -508,7 +572,10 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
         sendWorkoutSnapshotToiPhone(reason: "periodic workout update")
     }
 
-    private func sendWorkoutSnapshotToiPhone(reason: String) {
+    private func sendWorkoutSnapshotToiPhone(
+        reason: String,
+        adaptiveMixCurationTargetSegmentIndex: Int? = nil
+    ) {
         guard currentSegment != nil else { return }
 
         var updateMessage: [String: Any] = [
@@ -529,6 +596,10 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
 
         if let targetHeartRate {
             updateMessage["targetHeartRate"] = targetHeartRate
+        }
+
+        if let adaptiveMixCurationTargetSegmentIndex {
+            updateMessage["adaptiveMixCurationTargetSegmentIndex"] = adaptiveMixCurationTargetSegmentIndex
         }
 
         sendToiPhone(
@@ -575,7 +646,10 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
             guard let self = self, self.isRunning else { return }
 
             self.isStarting = false
+            let endDate = Date()
+            let builderToFinish = self.builder
             self.session?.end()
+            self.finishHealthWorkout(builder: builderToFinish, endDate: endDate)
             self.locationManager.stopUpdatingLocation()
             self.stopMotionTracking()
             self.stopWorkoutTimer()
@@ -589,6 +663,7 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
             self.workoutStartDate = nil
             self.segmentStartTime = nil
             self.segmentStartDistance = 0
+            self.lastPrecuratedUpcomingSegmentIndex = nil
             self.lastNotifiedKm = 0
             self.showKmMilestone = false
             self.lastKmMilestone = 0
@@ -599,6 +674,23 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
             self.hasSentHeartRateWarningToPhone = false
             self.kmDismissTimer?.invalidate()
             self.kmDismissTimer = nil
+        }
+    }
+
+    private func finishHealthWorkout(builder: HKLiveWorkoutBuilder?, endDate: Date) {
+        guard let builder else { return }
+
+        builder.endCollection(withEnd: endDate) { _, endError in
+            if let endError {
+                print("Failed to end Health workout collection: \(endError)")
+                return
+            }
+
+            builder.finishWorkout { _, finishError in
+                if let finishError {
+                    print("Failed to save Health workout: \(finishError)")
+                }
+            }
         }
     }
     
@@ -731,7 +823,6 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
                 self.isGPSAvailable = false
                 self.gpsStatus = .unavailable
             case .notDetermined:
-                manager.requestWhenInUseAuthorization()
                 self.isGPSAvailable = false
                 self.gpsStatus = .unknown
             case .authorizedWhenInUse, .authorizedAlways:

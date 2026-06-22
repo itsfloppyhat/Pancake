@@ -4,6 +4,38 @@ import Combine
 import UIKit
 #endif
 
+enum AdaptiveMixCurationTrigger: String {
+    case userStarted = "user started"
+    case periodicMetrics = "30-second metrics refresh"
+    case upcomingInterval = "upcoming interval"
+    case segmentChanged = "segment changed"
+}
+
+private extension AdaptiveMixCurationTrigger {
+    var priority: Int {
+        switch self {
+        case .periodicMetrics:
+            return 0
+        case .userStarted:
+            return 1
+        case .upcomingInterval:
+            return 2
+        case .segmentChanged:
+            return 3
+        }
+    }
+}
+
+struct AdaptiveMixQueueSnapshot {
+    let revision: Int
+    let createdAt: Date
+    let trigger: AdaptiveMixCurationTrigger
+    let targetSegmentIndex: Int
+    let goalScore: AdaptiveMixGoalScore
+    let songs: [MusicSong]
+    let rejectedCatalogCandidateCount: Int
+}
+
 // MARK: - Workout Music Coordinator
 @MainActor
 final class WorkoutMusicCoordinator: ObservableObject {
@@ -13,8 +45,13 @@ final class WorkoutMusicCoordinator: ObservableObject {
     @Published var currentWorkoutContext: WorkoutContext?
     @Published var lastMusicSuggestion: MusicSuggestion?
     @Published var liveMetricsWarning: String?
+    @Published private(set) var isAdaptiveMixActive = false
+    @Published private(set) var isAdaptiveMixCurating = false
+    @Published private(set) var adaptiveMixSnapshot: AdaptiveMixQueueSnapshot?
+    @Published private(set) var adaptiveMixStatus = "Adaptive Mix is off"
+    @Published private(set) var nextAdaptiveMixRefreshAt: Date?
 
-    /// Segments waiting for Watch to confirm workout started before music begins
+    /// Segments waiting for the watch companion to confirm workout start.
     private var pendingRunPlanSegments: [RunSegment]?
 
     private let musicManager = MusicPlaybackManager.shared
@@ -31,17 +68,16 @@ final class WorkoutMusicCoordinator: ObservableObject {
     private var recordingTimer: Timer?
     private var lastRecordedSongID: String?
     private var liveMetricsMonitorTimer: Timer?
+    private var adaptiveMixRefreshTimer: Timer?
     private var lastHeartRateSampleAt: Date?
     private var isLiveMetricsWarningDismissed = false
+    private var adaptiveMixRevision = 0
+    private var pendingAdaptiveMixCuration: (trigger: AdaptiveMixCurationTrigger, targetSegmentIndex: Int)?
 
     // Song pre-fetching
     private var prefetchedSuggestions: [MusicSuggestion] = []
-    private var prefetchTimer: Timer?
     private var isPrefetching = false
-    private var songEndCheckTimer: Timer?
     private var isAdvancingSong = false
-    private var lastSongAdvanceAt: Date = .distantPast
-    private var lastAutomaticSongAdvanceAttemptAt: Date = .distantPast
 
     // Session-wide played songs tracking (prevents repeats)
     private var playedSongsThisSession: Set<String> = []
@@ -53,9 +89,23 @@ final class WorkoutMusicCoordinator: ObservableObject {
     private static let maximumHeartRateSamples = 5
     private static let maximumRecentSongs = 5
     private static let preferredPrefetchDepth = 2
-    private static let minimumAutomaticAdvanceInterval: TimeInterval = 10
-    private static let minimumAutomaticAdvanceAttemptInterval: TimeInterval = 15
     private static let liveHeartRateGracePeriod: TimeInterval = 90
+
+    var adaptiveMixQueuedSongCount: Int {
+        min(musicManager.adaptiveUpcomingSongs.count, AdaptiveMixPolicy.queueDepth)
+    }
+
+    var playedSongCount: Int {
+        playedSongsThisSession.count
+    }
+
+    var adaptiveMixDetail: String {
+        guard let snapshot = adaptiveMixSnapshot else {
+            return adaptiveMixStatus
+        }
+
+        return "Mix \(snapshot.revision) | \(adaptiveMixQueuedSongCount) verified | \(playedSongCount) played | \(snapshot.goalScore.targetIntensity.label) | \(snapshot.goalScore.alignmentScore)% match | \(snapshot.rejectedCatalogCandidateCount) replaced | \(snapshot.trigger.rawValue)"
+    }
 
     // Fartlek detection
     private var isFartlekWorkout = false
@@ -78,7 +128,7 @@ final class WorkoutMusicCoordinator: ObservableObject {
             queue: .main
         ) { [weak self] notification in
             Task {
-                await self?.generateNextSong()
+                await self?.generateNextSongUserRequested()
             }
         }
         
@@ -177,12 +227,18 @@ final class WorkoutMusicCoordinator: ObservableObject {
                 self.sendPlaybackStateToWatch(self.musicManager.isPlaying, state: state)
             }
             .store(in: &cancellables)
+
+        musicManager.$adaptiveUpcomingSongs
+            .sink { [weak self] _ in
+                self?.sendAdaptiveMixStateToWatch()
+            }
+            .store(in: &cancellables)
     }
     
     // MARK: - Pending Run Plan (deferred music start)
 
-    /// Store segments from the iPhone run setup. Music will NOT start until
-    /// the Watch sends a `workoutStarted` confirmation message.
+    /// Store segments from the iPhone run setup so optional suggestions can use
+    /// workout context after the watch companion confirms the run has started.
     func setPendingRunPlan(_ segments: [RunSegment]) {
         pendingRunPlanSegments = segments
     }
@@ -197,7 +253,6 @@ final class WorkoutMusicCoordinator: ObservableObject {
 
         isWorkoutActive = true
         setIdleTimerDisabled(true)
-        musicManager.coordinatorDriven = true
 
         // Start time-series recording
         workoutStartTime = Date()
@@ -209,13 +264,12 @@ final class WorkoutMusicCoordinator: ObservableObject {
         isLiveMetricsWarningDismissed = false
         startRecordingTimer()
         startLiveMetricsMonitorTimer()
+        stopAdaptiveMixRefreshTimer()
 
         // Reset pre-fetch and session tracking
         prefetchedSuggestions.removeAll()
         isPrefetching = false
         isAdvancingSong = false
-        lastSongAdvanceAt = .distantPast
-        lastAutomaticSongAdvanceAttemptAt = .distantPast
         playedSongsThisSession.removeAll()
         unavailableSongsThisSession.removeAll()
         recentHeartRateSamples.removeAll()
@@ -224,6 +278,7 @@ final class WorkoutMusicCoordinator: ObservableObject {
         liveMetricsWarning = nil
         isLiveMetricsWarningDismissed = false
         aiService.beginVarietySession()
+        resetAdaptiveMixState()
 
         // Detect if this is a fartlek-style workout
         isFartlekWorkout = detectFartlekWorkout(segments: segments)
@@ -240,15 +295,8 @@ final class WorkoutMusicCoordinator: ObservableObject {
 
         currentWorkoutContext = context
 
-        // Start music playback immediately
-        musicManager.startWorkoutMusic(workoutContext: context)
-
-        // Generate the first song, then start pre-fetching
-        Task {
-            await generateStartingSong()
-            startPrefetchTimer()
-            startSongEndCheckTimer()
-        }
+        // Prepare optional music context. Playback starts only after a user action.
+        musicManager.startWorkoutMusic()
     }
     
     func stopWorkoutMusic() {
@@ -257,23 +305,17 @@ final class WorkoutMusicCoordinator: ObservableObject {
         // Stop recording timer
         stopRecordingTimer()
         stopLiveMetricsMonitorTimer()
-
-        // Stop pre-fetch timers
-        stopPrefetchTimer()
-        stopSongEndCheckTimer()
+        stopAdaptiveMixRefreshTimer()
 
         // Close the final song period
         closeFinalSongPeriod()
 
         isWorkoutActive = false
         setIdleTimerDisabled(false)
-        musicManager.coordinatorDriven = false
         currentWorkoutContext = nil
         prefetchedSuggestions.removeAll()
         isPrefetching = false
         isAdvancingSong = false
-        lastSongAdvanceAt = .distantPast
-        lastAutomaticSongAdvanceAttemptAt = .distantPast
         recentHeartRateSamples.removeAll()
         recentPlayedSongs.removeAll()
         playedSongsThisSession.removeAll()
@@ -283,6 +325,7 @@ final class WorkoutMusicCoordinator: ObservableObject {
         liveMetricsWarning = nil
         isLiveMetricsWarningDismissed = false
         aiService.endVarietySession()
+        resetAdaptiveMixState()
 
         // Stop music playback
         musicManager.stopWorkoutMusic()
@@ -310,7 +353,6 @@ final class WorkoutMusicCoordinator: ObservableObject {
         )
         
         currentWorkoutContext = updatedContext
-        musicManager.updateWorkoutContext(updatedContext)
         
         // Check for distance milestones (only for single segment workouts)
         checkForDistanceMilestone(previousDistance: context.totalDistance, newDistance: totalDistance)
@@ -322,79 +364,314 @@ final class WorkoutMusicCoordinator: ObservableObject {
     private func checkForDistanceMilestone(previousDistance: Double, newDistance: Double) {
         // Km milestones are now handled on the Watch side with haptic feedback
     }
-    
-    // MARK: - Music Suggestion Generation
-    
-    func generateStartingSong() async {
-        guard beginSongAdvance(isAutomatic: false) else { return }
-        defer { finishSongAdvance() }
 
-        guard let context = currentWorkoutContext else { return }
+    // MARK: - Adaptive Mix
 
-        let intensity = effectiveIntensity(
-            at: context.currentSegmentIndex,
-            segments: context.segments
-        )
-
-        let played = await resolveAndPlaySuggestion(fallbackIntensity: intensity) {
-            try await self.aiService.generateStartingSongSuggestion(
-                workoutPlan: context.segments,
-                userPreferences: self.profileManager.userProfile.musicPreferences,
-                currentIntensity: intensity,
-                isFartlek: self.isFartlekWorkout,
-                mustUseLibrary: self.mustUseLibrarySuggestions
-            )
-        }
-
-        if played {
-            triggerPrefetch()
-        }
-    }
-    
-    func generateNextSong() async {
-        guard beginSongAdvance(isAutomatic: true) else { return }
-        defer { finishSongAdvance() }
-
-        // If we have a pre-fetched suggestion, use it immediately
-        if let prefetched = takePrefetchedSuggestion(),
-           await playSuggestedSong(prefetched) {
-            triggerPrefetch()
+    func startAdaptiveMixUserRequested() async {
+        guard isWorkoutActive, let context = currentWorkoutContext else {
+            adaptiveMixStatus = "Start a workout before starting Adaptive Mix"
+            sendAdaptiveMixStateToWatch()
             return
         }
 
-        // No pre-fetched song — generate one now
-        guard let context = currentWorkoutContext else { return }
-
-        // For fartlek workouts, compute the effective intensity using the lookahead window
-        let upcomingIntensity: Intensity? = if isFartlekWorkout {
-            effectiveIntensity(at: context.currentSegmentIndex, segments: context.segments)
-        } else {
-            context.upcomingSegment?.intensity
+        guard musicManager.hasCatalogAccess else {
+            adaptiveMixStatus = "Connect Apple Music playback on iPhone to use Adaptive Mix"
+            sendAdaptiveMixStateToWatch()
+            return
         }
 
-        let fallbackIntensity = upcomingIntensity ?? context.currentSegment.intensity
+        guard !isAdaptiveMixActive else {
+            return
+        }
 
-        let played = await resolveAndPlaySuggestion(fallbackIntensity: fallbackIntensity) {
-            try await self.aiService.generateIntervalChangeSuggestion(
-                context: context.musicContext,
-                userPreferences: self.profileManager.userProfile.musicPreferences,
-                currentDistance: context.totalDistance,
-                currentTime: context.totalTime,
-                upcomingIntensity: upcomingIntensity,
-                isFartlek: self.isFartlekWorkout,
-                mustUseLibrary: self.mustUseLibrarySuggestions
+        isAdaptiveMixActive = true
+        adaptiveMixStatus = "Curating Adaptive Mix"
+        sendAdaptiveMixStateToWatch()
+
+        await requestAdaptiveMixCuration(
+            trigger: .userStarted,
+            targetSegmentIndex: context.currentSegmentIndex,
+            shouldStartPlayback: true
+        )
+    }
+
+    private func requestAdaptiveMixCuration(
+        trigger: AdaptiveMixCurationTrigger,
+        targetSegmentIndex: Int,
+        shouldStartPlayback: Bool = false
+    ) async {
+        guard isAdaptiveMixActive, let workoutContext = currentWorkoutContext else {
+            return
+        }
+
+        guard !isAdaptiveMixCurating else {
+            rememberPendingAdaptiveMixCuration(
+                trigger: trigger,
+                targetSegmentIndex: targetSegmentIndex
+            )
+            return
+        }
+
+        let boundedTargetIndex = min(max(0, targetSegmentIndex), workoutContext.segments.count - 1)
+        let musicContext = makeAdaptiveMixContext(
+            from: workoutContext,
+            targetSegmentIndex: boundedTargetIndex
+        )
+        let goalScore = AdaptiveMixPolicy.goalScore(
+            targetIntensity: musicContext.currentIntensity,
+            targetHeartRate: musicContext.targetHeartRate,
+            effectiveHeartRate: musicContext.effectiveHeartRate
+        )
+        let requiredSongCount = shouldStartPlayback ? AdaptiveMixPolicy.queueDepth + 1 : AdaptiveMixPolicy.queueDepth
+
+        isAdaptiveMixCurating = true
+        adaptiveMixStatus = "Curating \(musicContext.currentIntensity.label) mix"
+        sendAdaptiveMixStateToWatch()
+
+        var candidates: [MusicSuggestion] = []
+        let promptAvoidedSongs = adaptiveMixPromptAvoidedSongs(shouldStartPlayback: shouldStartPlayback)
+
+        do {
+            candidates = try await aiService.generateAdaptiveMixSuggestions(
+                context: musicContext,
+                userPreferences: profileManager.userProfile.musicPreferences,
+                goalScore: goalScore,
+                avoidedSongs: promptAvoidedSongs
+            )
+        } catch {
+            print("Adaptive Mix generation fell back: \(error)")
+        }
+
+        let excludedSongKeys = adaptiveMixExcludedSongKeys(shouldStartPlayback: shouldStartPlayback)
+        candidates.append(contentsOf: adaptiveMixFallbackSuggestions(for: goalScore))
+        candidates = uniqueAdaptiveMixSuggestions(candidates, excluding: excludedSongKeys)
+
+        let resolutionReport = await musicManager.resolveAdaptiveMixSuggestions(
+            candidates,
+            excluding: excludedSongKeys,
+            limit: requiredSongCount
+        )
+        let resolvedItems = resolutionReport.items
+
+        let didApplyQueue: Bool
+        if !resolutionReport.hasVerifiedSongCount(requiredSongCount) {
+            didApplyQueue = false
+        } else if shouldStartPlayback {
+            didApplyQueue = await musicManager.startAdaptiveMix(with: resolvedItems)
+        } else {
+            didApplyQueue = musicManager.replaceAdaptiveMixUpcoming(
+                with: Array(resolvedItems.prefix(AdaptiveMixPolicy.queueDepth))
             )
         }
 
-        if played {
-            triggerPrefetch()
+        if didApplyQueue {
+            adaptiveMixRevision += 1
+            adaptiveMixSnapshot = AdaptiveMixQueueSnapshot(
+                revision: adaptiveMixRevision,
+                createdAt: Date(),
+                trigger: trigger,
+                targetSegmentIndex: boundedTargetIndex,
+                goalScore: goalScore,
+                songs: Array(musicManager.adaptiveUpcomingSongs.prefix(AdaptiveMixPolicy.queueDepth)),
+                rejectedCatalogCandidateCount: resolutionReport.rejectedSuggestionCount
+            )
+            adaptiveMixStatus = adaptiveMixStatusText(
+                queueCount: musicManager.adaptiveUpcomingSongs.count,
+                targetIntensity: goalScore.targetIntensity,
+                rejectedCatalogCandidateCount: resolutionReport.rejectedSuggestionCount
+            )
+            if trigger == .userStarted {
+                restartAdaptiveMixRefreshTimer()
+            }
+        } else if musicManager.isAdaptivePlaybackActive {
+            adaptiveMixStatus = "Keeping current mix: \(resolvedItems.count)/\(requiredSongCount) Apple Music songs verified"
+        } else {
+            adaptiveMixStatus = "Adaptive Mix could not start. Check Apple Music playback on iPhone."
+            isAdaptiveMixActive = false
+            stopAdaptiveMixRefreshTimer()
+        }
+
+        isAdaptiveMixCurating = false
+        sendAdaptiveMixStateToWatch()
+
+        if let pending = pendingAdaptiveMixCuration {
+            pendingAdaptiveMixCuration = nil
+            await requestAdaptiveMixCuration(
+                trigger: pending.trigger,
+                targetSegmentIndex: pending.targetSegmentIndex
+            )
         }
     }
+
+    private func rememberPendingAdaptiveMixCuration(
+        trigger: AdaptiveMixCurationTrigger,
+        targetSegmentIndex: Int
+    ) {
+        if let pendingAdaptiveMixCuration,
+           pendingAdaptiveMixCuration.trigger.priority > trigger.priority {
+            return
+        }
+
+        pendingAdaptiveMixCuration = (trigger, targetSegmentIndex)
+    }
+
+    private func restartAdaptiveMixRefreshTimer() {
+        guard isAdaptiveMixActive else { return }
+
+        stopAdaptiveMixRefreshTimer()
+        nextAdaptiveMixRefreshAt = Date().addingTimeInterval(AdaptiveMixPolicy.refreshInterval)
+        adaptiveMixRefreshTimer = Timer.scheduledTimer(
+            withTimeInterval: AdaptiveMixPolicy.refreshInterval,
+            repeats: false
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, let context = self.currentWorkoutContext else { return }
+
+                self.restartAdaptiveMixRefreshTimer()
+                await self.requestAdaptiveMixCuration(
+                    trigger: .periodicMetrics,
+                    targetSegmentIndex: context.currentSegmentIndex
+                )
+            }
+        }
+    }
+
+    private func stopAdaptiveMixRefreshTimer() {
+        adaptiveMixRefreshTimer?.invalidate()
+        adaptiveMixRefreshTimer = nil
+        nextAdaptiveMixRefreshAt = nil
+    }
+
+    private func resetAdaptiveMixState() {
+        stopAdaptiveMixRefreshTimer()
+        isAdaptiveMixActive = false
+        isAdaptiveMixCurating = false
+        adaptiveMixSnapshot = nil
+        adaptiveMixStatus = "Adaptive Mix is off"
+        adaptiveMixRevision = 0
+        pendingAdaptiveMixCuration = nil
+        sendAdaptiveMixStateToWatch()
+    }
+
+    private func makeAdaptiveMixContext(
+        from workoutContext: WorkoutContext,
+        targetSegmentIndex: Int
+    ) -> MusicContext {
+        let boundedTargetIndex = min(max(0, targetSegmentIndex), workoutContext.segments.count - 1)
+        let targetSegment = workoutContext.segments[boundedTargetIndex]
+        let currentContext = workoutContext.musicContext
+        let timeRemaining = if boundedTargetIndex == workoutContext.currentSegmentIndex {
+            workoutContext.timeRemainingInSegment
+        } else {
+            segmentDurationSeconds(targetSegment)
+        }
+
+        return MusicContext(
+            currentHeartRate: currentContext.currentHeartRate,
+            guidanceHeartRate: currentContext.guidanceHeartRate,
+            targetHeartRate: targetSegment.intensity.defaultTargetHeartRate,
+            heartRateTrend: currentContext.heartRateTrend,
+            hasStableHeartRateSignal: currentContext.hasStableHeartRateSignal,
+            currentIntensity: targetSegment.intensity,
+            timeRemainingInSegment: timeRemaining,
+            currentSongEndingIn: currentContext.currentSongEndingIn,
+            userPreferences: currentContext.userPreferences,
+            recentSongs: currentContext.recentSongs,
+            currentDistance: currentContext.currentDistance,
+            currentPace: currentContext.currentPace,
+            isActive: currentContext.isActive
+        )
+    }
+
+    private func adaptiveMixFallbackSuggestions(for goalScore: AdaptiveMixGoalScore) -> [MusicSuggestion] {
+        let preferredIntensities: [Intensity]
+
+        switch goalScore.guidance {
+        case .easeDown:
+            preferredIntensities = Intensity.allCases
+        case .lift:
+            preferredIntensities = Array(Intensity.allCases.reversed())
+        case .maintain, .followPlan:
+            preferredIntensities = [goalScore.targetIntensity] + Intensity.allCases
+        }
+
+        return preferredIntensities
+            .flatMap(MusicAIService.fallbackSuggestions(for:))
+    }
+
+    private func adaptiveMixExcludedSongKeys(shouldStartPlayback: Bool) -> Set<String> {
+        var songKeys = excludedSongKeys
+            .union(prefetchedSuggestions.map(\.sessionSongKey))
+
+        if let currentSong = musicManager.currentSong {
+            songKeys.insert(currentSong.sessionSongKey)
+        }
+
+        if shouldStartPlayback {
+            songKeys.formUnion(musicManager.adaptiveUpcomingSongs.map(\.sessionSongKey))
+        }
+
+        return songKeys
+    }
+
+    private func adaptiveMixPromptAvoidedSongs(shouldStartPlayback: Bool) -> [MusicSong] {
+        var songs: [MusicSong] = []
+        var seenSongKeys = Set<String>()
+
+        func appendIfNew(_ song: MusicSong) {
+            guard seenSongKeys.insert(song.sessionSongKey).inserted else {
+                return
+            }
+            songs.append(song)
+        }
+
+        recentPlayedSongs.forEach(appendIfNew)
+
+        if let currentSong = musicManager.currentSong {
+            appendIfNew(currentSong)
+        }
+
+        if !shouldStartPlayback {
+            for song in musicManager.adaptiveUpcomingSongs {
+                appendIfNew(song)
+            }
+        }
+
+        return songs
+    }
+
+    private func uniqueAdaptiveMixSuggestions(
+        _ suggestions: [MusicSuggestion],
+        excluding excludedSongKeys: Set<String>
+    ) -> [MusicSuggestion] {
+        var seenKeys = Set<String>()
+
+        return suggestions
+            .map { $0.cleanedTitle() }
+            .filter { suggestion in
+                AdaptiveMixPolicy.canQueue(
+                    songKey: suggestion.sessionSongKey,
+                    playedSongKeys: excludedSongKeys,
+                    temporarilyReservedSongKeys: seenKeys
+                ) &&
+                    seenKeys.insert(suggestion.sessionSongKey).inserted
+            }
+    }
+
+    private func adaptiveMixStatusText(
+        queueCount: Int,
+        targetIntensity: Intensity,
+        rejectedCatalogCandidateCount: Int
+    ) -> String {
+        "\(min(queueCount, AdaptiveMixPolicy.queueDepth)) Apple Music songs verified for \(targetIntensity.label); \(rejectedCatalogCandidateCount) replaced"
+    }
+
+    // MARK: - Music Suggestion Generation
 
     /// User-initiated "new song" request from the Watch button.
     /// Uses pre-fetched song if available for instant response.
     func generateNextSongUserRequested() async {
-        guard beginSongAdvance(isAutomatic: false) else { return }
+        guard beginSongAdvance() else { return }
         defer { finishSongAdvance() }
 
         // If we have a pre-fetched suggestion, play it immediately
@@ -432,20 +709,6 @@ final class WorkoutMusicCoordinator: ObservableObject {
     }
 
     // MARK: - Song Pre-fetching
-
-    private func startPrefetchTimer() {
-        stopPrefetchTimer()
-        prefetchTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.triggerPrefetch()
-            }
-        }
-    }
-
-    private func stopPrefetchTimer() {
-        prefetchTimer?.invalidate()
-        prefetchTimer = nil
-    }
 
     /// Start a pre-fetch in the background (non-blocking)
     private func triggerPrefetch() {
@@ -508,46 +771,6 @@ final class WorkoutMusicCoordinator: ObservableObject {
         }
     }
 
-    // MARK: - Song End Detection
-
-    private func startSongEndCheckTimer() {
-        stopSongEndCheckTimer()
-        // Check every 3 seconds if the song is about to end or has ended
-        songEndCheckTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.checkForSongEnd()
-            }
-        }
-    }
-
-    private func stopSongEndCheckTimer() {
-        songEndCheckTimer?.invalidate()
-        songEndCheckTimer = nil
-    }
-
-    private func checkForSongEnd() {
-        guard isWorkoutActive else { return }
-        guard !isAdvancingSong else { return }
-
-        let timeRemaining = musicManager.currentSongDuration - musicManager.currentPlaybackTime
-        let hasNoSong = musicManager.currentSong == nil
-        let songEnding = timeRemaining > 0 && timeRemaining <= 5.0 // Within 5 seconds of ending
-        let songEnded = musicManager.currentSongDuration > 0 && musicManager.currentPlaybackTime >= musicManager.currentSongDuration - 0.5
-        let playbackStopped = !musicManager.isPlaying && musicManager.currentSong != nil && musicManager.currentSongDuration > 0
-
-        if musicManager.currentSong != nil,
-           musicManager.currentPlaybackTime > 0,
-           musicManager.currentPlaybackTime < Self.minimumAutomaticAdvanceInterval {
-            return
-        }
-
-        if hasNoSong || songEnding || songEnded || playbackStopped {
-            Task {
-                await generateNextSong()
-            }
-        }
-    }
-    
     @discardableResult
     private func playSuggestedSong(_ suggestion: MusicSuggestion) async -> Bool {
         let cleaned = suggestion.cleanedTitle()
@@ -589,7 +812,6 @@ final class WorkoutMusicCoordinator: ObservableObject {
             intensity: fallbackIntensity,
             avoiding: reservedSongKeys
         ).cleanedTitle()
-        aiService.registerSessionSuggestion(fallback)
 
         guard !reservedSongKeys.contains(fallback.sessionSongKey) else {
             return nil
@@ -626,7 +848,6 @@ final class WorkoutMusicCoordinator: ObservableObject {
                 playedSongsThisSession.insert(actualSongKey)
             }
             unavailableSongsThisSession.remove(songKey)
-            aiService.registerSessionSuggestion(emergencySuggestion)
             lastMusicSuggestion = emergencySuggestion
             return true
         }
@@ -670,24 +891,9 @@ final class WorkoutMusicCoordinator: ObservableObject {
         return nil
     }
 
-    private func beginSongAdvance(isAutomatic: Bool) -> Bool {
-        guard isWorkoutActive || !isAutomatic else { return false }
+    private func beginSongAdvance() -> Bool {
+        guard isWorkoutActive else { return false }
         guard !isAdvancingSong else { return false }
-
-        if isAutomatic {
-            let now = Date()
-            let secondsSinceLastAdvance = now.timeIntervalSince(lastSongAdvanceAt)
-            if secondsSinceLastAdvance < Self.minimumAutomaticAdvanceInterval {
-                return false
-            }
-
-            let secondsSinceLastAttempt = now.timeIntervalSince(lastAutomaticSongAdvanceAttemptAt)
-            if secondsSinceLastAttempt < Self.minimumAutomaticAdvanceAttemptInterval {
-                return false
-            }
-
-            lastAutomaticSongAdvanceAttemptAt = now
-        }
 
         isAdvancingSong = true
         return true
@@ -702,7 +908,9 @@ final class WorkoutMusicCoordinator: ObservableObject {
     }
 
     private var reservedSongKeys: Set<String> {
-        excludedSongKeys.union(prefetchedSuggestions.map(\.sessionSongKey))
+        excludedSongKeys
+            .union(prefetchedSuggestions.map(\.sessionSongKey))
+            .union(musicManager.adaptiveUpcomingSongs.map(\.sessionSongKey))
     }
 
     private var mustUseLibrarySuggestions: Bool {
@@ -906,6 +1114,35 @@ final class WorkoutMusicCoordinator: ObservableObject {
             print("Failed to send playback state to watch: \(error)")
         }
     }
+
+    private func sendAdaptiveMixStateToWatch() {
+        guard watchConnectivity.isWatchPaired && watchConnectivity.isWatchAppInstalled else { return }
+
+        var message: [String: Any] = [
+            "type": WatchMessageType.adaptiveMixState.rawValue,
+            "isActive": isAdaptiveMixActive,
+            "isCurating": isAdaptiveMixCurating,
+            "queuedSongCount": min(musicManager.adaptiveUpcomingSongs.count, AdaptiveMixPolicy.queueDepth),
+            "playedSongCount": playedSongCount,
+            "status": adaptiveMixStatus
+        ]
+
+        if let snapshot = adaptiveMixSnapshot {
+            message["revision"] = snapshot.revision
+            message["trigger"] = snapshot.trigger.rawValue
+            message["targetZone"] = snapshot.goalScore.targetIntensity.label
+            message["alignmentScore"] = snapshot.goalScore.alignmentScore
+            message["replacedSongCount"] = snapshot.rejectedCatalogCandidateCount
+        }
+
+        if let nextAdaptiveMixRefreshAt {
+            message["nextRefreshAt"] = nextAdaptiveMixRefreshAt.timeIntervalSince1970
+        }
+
+        watchConnectivity.sendMessageWithFallback(message) { error in
+            print("Failed to send Adaptive Mix state to watch: \(error)")
+        }
+    }
     
     private func sendMusicSuggestionToWatch(_ suggestion: MusicSuggestion) {
         guard watchConnectivity.isWatchPaired && watchConnectivity.isWatchAppInstalled else { return }
@@ -932,11 +1169,25 @@ final class WorkoutMusicCoordinator: ObservableObject {
         switch action {
         case "play":
             musicManager.play()
+        case "pause":
+            musicManager.pause()
         case "stop":
             musicManager.stop()
+        case "adaptiveMix":
+            Task {
+                await startAdaptiveMixUserRequested()
+            }
+        case "next":
+            Task {
+                await musicManager.skipAdaptiveMixToNext()
+            }
         case "suggest":
             Task {
-                await generateNextSongUserRequested()
+                if isAdaptiveMixActive {
+                    await musicManager.skipAdaptiveMixToNext()
+                } else {
+                    await generateNextSongUserRequested()
+                }
             }
         default:
             break
@@ -971,8 +1222,8 @@ final class WorkoutMusicCoordinator: ObservableObject {
             } else if let segments = decodeSegmentsFromWatchMessage(message) {
                 startWorkoutMusic(segments: segments)
             } else {
-                // Watch started a workout without iPhone sending a plan first.
-                // Start music with a default single Zone 2 segment so the user still gets music.
+                // Watch started a workout without an iPhone plan. Keep a default
+                // context available if the user asks for a music suggestion.
                 let defaultSegments = [RunSegment(intensity: .zone2, target: .time(seconds: 1800))]
                 startWorkoutMusic(segments: defaultSegments)
             }
@@ -1081,7 +1332,17 @@ final class WorkoutMusicCoordinator: ObservableObject {
         )
 
         currentWorkoutContext = updatedContext
-        musicManager.updateWorkoutContext(updatedContext)
+
+        if let adaptiveMixCurationTargetSegmentIndex = message["adaptiveMixCurationTargetSegmentIndex"] as? Int,
+           isAdaptiveMixActive {
+            restartAdaptiveMixRefreshTimer()
+            Task {
+                await requestAdaptiveMixCuration(
+                    trigger: .upcomingInterval,
+                    targetSegmentIndex: adaptiveMixCurationTargetSegmentIndex
+                )
+            }
+        }
 
         if segmentChanged {
             handleSegmentChange(segmentIndex: segmentIndex)
@@ -1105,7 +1366,6 @@ final class WorkoutMusicCoordinator: ObservableObject {
         )
 
         currentWorkoutContext = updatedContext
-        musicManager.updateWorkoutContext(updatedContext)
 
         // For fartlek workouts, skip song changes on short segments.
         // The current song continues and we rely on the lookahead intensity
@@ -1121,9 +1381,18 @@ final class WorkoutMusicCoordinator: ObservableObject {
             }
         }
 
-        // Generate a new song suggestion for the new segment
-        Task {
-            await generateNextSong()
+        guard isAdaptiveMixActive else {
+            return
+        }
+
+        if adaptiveMixSnapshot?.targetSegmentIndex != segmentIndex {
+            restartAdaptiveMixRefreshTimer()
+            Task {
+                await requestAdaptiveMixCuration(
+                    trigger: .segmentChanged,
+                    targetSegmentIndex: segmentIndex
+                )
+            }
         }
     }
 
@@ -1163,7 +1432,7 @@ final class WorkoutMusicCoordinator: ObservableObject {
         guard Date().timeIntervalSince(workoutStartTime) >= Self.liveHeartRateGracePeriod else { return }
         guard lastHeartRateSampleAt == nil else { return }
 
-        liveMetricsWarning = "Heart rate has not arrived from Apple Watch yet. Music is using the run plan, segment intensity, distance, pace, and song history until heart-rate data starts."
+        liveMetricsWarning = "Heart rate has not arrived from your watch yet. Music is using the run plan, segment intensity, distance, pace, and song history until heart-rate data starts."
     }
 
     func dismissLiveMetricsWarning() {
@@ -1222,9 +1491,20 @@ final class WorkoutMusicCoordinator: ObservableObject {
 
         // Start new song period
         if let song = song {
-            playedSongsThisSession.insert(song.sessionSongKey)
+            let songKey = song.sessionSongKey
+            let isNewlyPlayedSong = !playedSongsThisSession.contains(songKey)
+            playedSongsThisSession = AdaptiveMixPolicy.recordingPlayedSong(
+                songKey,
+                in: playedSongsThisSession
+            )
             rememberPlayedSong(song)
-            lastSongAdvanceAt = Date()
+            aiService.registerPlayedSong(song)
+
+            if isNewlyPlayedSong {
+                print("Workout recorded played song: \(song.title) by \(song.artist)")
+                sendAdaptiveMixStateToWatch()
+            }
+
             songHistory.append(SongPeriod(
                 songTitle: song.title,
                 artist: song.artist,

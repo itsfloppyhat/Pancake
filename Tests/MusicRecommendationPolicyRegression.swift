@@ -11,6 +11,9 @@ struct MusicRecommendationPolicyRegression {
             try testFallbackSuggestionAvoidsPlayedManualFavorites()
             try testFallbackSuggestionUsesImportedTasteSample()
             try testNormalizedSongIdentityCollapsesVariants()
+            try testAdaptiveMixGoalScoring()
+            try testUpcomingIntervalPrecurationWindow()
+            try testAdaptiveMixQueuedSongsRemainEligibleUntilPlayed()
             print("All Pancake music policy regressions passed.")
         } catch {
             fputs("Regression failure: \(error.localizedDescription)\n", stderr)
@@ -137,6 +140,93 @@ struct MusicRecommendationPolicyRegression {
 
         try assertEqual(normalizedA, normalizedB, "Normalization should collapse common song-title variants.")
         try assertEqual(sessionKeyA, sessionKeyB, "Suggestion and playback keys should normalize to the same repeat key.")
+    }
+
+    private static func testAdaptiveMixGoalScoring() throws {
+        let easeDown = AdaptiveMixPolicy.goalScore(
+            targetIntensity: .zone2,
+            targetHeartRate: 130,
+            effectiveHeartRate: 146
+        )
+        let lift = AdaptiveMixPolicy.goalScore(
+            targetIntensity: .zone4,
+            targetHeartRate: 162,
+            effectiveHeartRate: 146
+        )
+        let missingMetrics = AdaptiveMixPolicy.goalScore(
+            targetIntensity: .zone3,
+            targetHeartRate: 150,
+            effectiveHeartRate: nil
+        )
+
+        try assertEqual(easeDown.guidance, .easeDown, "A high heart rate should reduce musical intensity.")
+        try assertEqual(easeDown.alignmentScore, 36, "Alignment score should fall as heart rate moves away from target.")
+        try assertEqual(lift.guidance, .lift, "A low heart rate should increase musical intensity.")
+        try assertEqual(missingMetrics.guidance, .followPlan, "Missing heart-rate data should use the planned interval.")
+    }
+
+    private static func testUpcomingIntervalPrecurationWindow() throws {
+        try assertEqual(AdaptiveMixPolicy.refreshInterval, 30, "Adaptive Mix should regenerate playlists every 30 seconds.")
+        try assertEqual(AdaptiveMixPolicy.upcomingIntervalLeadTime, 10, "Adaptive Mix should pre-curate 10 seconds before a new segment.")
+
+        try assertTrue(
+            AdaptiveMixPolicy.shouldPrecurateUpcomingInterval(
+                estimatedSecondsRemaining: 10,
+                hasUpcomingInterval: true,
+                alreadyPrecurated: false
+            ),
+            "Ten seconds remaining should trigger next-interval curation."
+        )
+        try assertTrue(
+            !AdaptiveMixPolicy.shouldPrecurateUpcomingInterval(
+                estimatedSecondsRemaining: 11,
+                hasUpcomingInterval: true,
+                alreadyPrecurated: false
+            ),
+            "More than ten seconds remaining should not trigger next-interval curation."
+        )
+        try assertTrue(
+            !AdaptiveMixPolicy.shouldPrecurateUpcomingInterval(
+                estimatedSecondsRemaining: 4,
+                hasUpcomingInterval: true,
+                alreadyPrecurated: true
+            ),
+            "The same interval should only pre-curate once."
+        )
+    }
+
+    private static func testAdaptiveMixQueuedSongsRemainEligibleUntilPlayed() throws {
+        let songKey = "runner|fresh pick"
+        var playedSongKeys = Set<String>()
+        let queuedSongKeys: Set<String> = [songKey]
+
+        try assertTrue(
+            !AdaptiveMixPolicy.canQueue(
+                songKey: songKey,
+                playedSongKeys: playedSongKeys,
+                temporarilyReservedSongKeys: queuedSongKeys
+            ),
+            "A queued song should be reserved while it remains in the current three-song buffer."
+        )
+        try assertTrue(
+            AdaptiveMixPolicy.canQueue(
+                songKey: songKey,
+                playedSongKeys: playedSongKeys,
+                temporarilyReservedSongKeys: []
+            ),
+            "A queued but unplayed song should become eligible again after it leaves the current buffer."
+        )
+
+        playedSongKeys = AdaptiveMixPolicy.recordingPlayedSong(songKey, in: playedSongKeys)
+
+        try assertTrue(
+            !AdaptiveMixPolicy.canQueue(
+                songKey: songKey,
+                playedSongKeys: playedSongKeys,
+                temporarilyReservedSongKeys: []
+            ),
+            "A song that played should remain excluded for the rest of the workout."
+        )
     }
 
     private static func assertTrue(_ condition: Bool, _ message: String) throws {

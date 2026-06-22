@@ -242,6 +242,111 @@ enum MusicRecommendationPolicy {
     }
 }
 
+struct AdaptiveMixGoalScore: Equatable {
+    let targetIntensity: Intensity
+    let targetHeartRate: Int?
+    let effectiveHeartRate: Int?
+    let heartRateDelta: Int?
+    let alignmentScore: Int
+    let guidance: AdaptiveMixGuidance
+}
+
+enum AdaptiveMixGuidance: String, Codable, Equatable {
+    case easeDown
+    case maintain
+    case lift
+    case followPlan
+
+    var promptDescription: String {
+        switch self {
+        case .easeDown:
+            return "Reduce musical intensity to guide effort down toward the planned target."
+        case .maintain:
+            return "Maintain musical intensity because live effort is close to the planned target."
+        case .lift:
+            return "Increase musical intensity to guide effort up toward the planned target."
+        case .followPlan:
+            return "Use the planned interval intensity because live heart-rate alignment is not available yet."
+        }
+    }
+}
+
+enum AdaptiveMixPolicy {
+    static let refreshInterval: TimeInterval = 30
+    static let upcomingIntervalLeadTime: TimeInterval = 10
+    static let queueDepth = 3
+
+    static func goalScore(
+        targetIntensity: Intensity,
+        targetHeartRate: Int?,
+        effectiveHeartRate: Int?
+    ) -> AdaptiveMixGoalScore {
+        guard let targetHeartRate, let effectiveHeartRate else {
+            return AdaptiveMixGoalScore(
+                targetIntensity: targetIntensity,
+                targetHeartRate: targetHeartRate,
+                effectiveHeartRate: effectiveHeartRate,
+                heartRateDelta: nil,
+                alignmentScore: 50,
+                guidance: .followPlan
+            )
+        }
+
+        let delta = effectiveHeartRate - targetHeartRate
+        let absoluteDelta = abs(delta)
+        let alignmentScore = max(0, 100 - (absoluteDelta * 4))
+        let guidance: AdaptiveMixGuidance
+
+        if delta >= 8 {
+            guidance = .easeDown
+        } else if delta <= -8 {
+            guidance = .lift
+        } else {
+            guidance = .maintain
+        }
+
+        return AdaptiveMixGoalScore(
+            targetIntensity: targetIntensity,
+            targetHeartRate: targetHeartRate,
+            effectiveHeartRate: effectiveHeartRate,
+            heartRateDelta: delta,
+            alignmentScore: alignmentScore,
+            guidance: guidance
+        )
+    }
+
+    static func shouldPrecurateUpcomingInterval(
+        estimatedSecondsRemaining: TimeInterval?,
+        hasUpcomingInterval: Bool,
+        alreadyPrecurated: Bool
+    ) -> Bool {
+        guard hasUpcomingInterval,
+              !alreadyPrecurated,
+              let estimatedSecondsRemaining else {
+            return false
+        }
+
+        return estimatedSecondsRemaining > 0 &&
+            estimatedSecondsRemaining <= upcomingIntervalLeadTime
+    }
+
+    static func canQueue(
+        songKey: String,
+        playedSongKeys: Set<String>,
+        temporarilyReservedSongKeys: Set<String>
+    ) -> Bool {
+        !playedSongKeys.contains(songKey) &&
+            !temporarilyReservedSongKeys.contains(songKey)
+    }
+
+    static func recordingPlayedSong(
+        _ songKey: String,
+        in playedSongKeys: Set<String>
+    ) -> Set<String> {
+        playedSongKeys.union([songKey])
+    }
+}
+
 private extension Array where Element: Hashable {
     func uniqued() -> [Element] {
         var seen = Set<Element>()

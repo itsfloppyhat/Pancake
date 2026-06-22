@@ -15,6 +15,12 @@ final class PromptLabViewModel: ObservableObject {
         }
     }
 
+    private struct ActiveWorkoutSongCheckError: LocalizedError {
+        var errorDescription: String? {
+            "Finish the active workout before starting Song Check."
+        }
+    }
+
     private static let maxGenerationAttempts = 10
     private static let songArtistDelimiters = [" by ", " - ", " — "]
 
@@ -36,18 +42,31 @@ final class PromptLabViewModel: ObservableObject {
     @Published var generatedSuggestion: MusicSuggestion?
     @Published var isGenerating: Bool = false
     @Published var error: Error?
+    @Published private(set) var isAdaptiveMixPreviewActive = false
+    @Published private(set) var adaptiveMixPreviewQueue: [MusicSong] = []
+    @Published private(set) var adaptiveMixPreviewStatus = "Ready to generate a verified Apple Music mix"
+    @Published private(set) var adaptiveMixPreviewRevision = 0
+    @Published private(set) var adaptiveMixPreviewSecondsUntilRefresh = Int(AdaptiveMixPolicy.refreshInterval)
+    @Published private(set) var adaptiveMixPreviewGoalScore: AdaptiveMixGoalScore?
+    @Published private(set) var adaptiveMixPreviewRejectedSongCount = 0
 
     private let profileManager = UserProfileManager.shared
     private let musicManager = MusicPlaybackManager.shared
     private let aiService = MusicAIService.shared
     private let musicKitService = MusicKitService.shared
+    private let workoutCoordinator = WorkoutMusicCoordinator.shared
 
     private var cancellables = Set<AnyCancellable>()
     private var songCheckGeneratedSongs: [MusicSong] = []
     private var songCheckGeneratedSongKeys: Set<String> = []
+    private var adaptiveMixPreviewPlayedSongs: [MusicSong] = []
+    private var adaptiveMixPreviewPlayedSongKeys = Set<String>()
+    private var adaptiveMixPreviewRefreshTimer: Timer?
+    private var hasPendingAdaptiveMixPreviewRefresh = false
 
     init() {
         setupBindings()
+        setupAdaptiveMixMetricBindings()
         syncTasteInputsFromProfile()
     }
 
@@ -86,8 +105,63 @@ final class PromptLabViewModel: ObservableObject {
             .store(in: &cancellables)
 
         musicManager.$currentSong
-            .sink { [weak self] _ in
+            .sink { [weak self] song in
+                self?.recordAdaptiveMixPreviewPlayedSong(song)
                 self?.objectWillChange.send()
+            }
+            .store(in: &cancellables)
+
+        musicManager.$adaptiveUpcomingSongs
+            .sink { [weak self] songs in
+                guard let self, self.isAdaptiveMixPreviewActive else {
+                    return
+                }
+
+                self.adaptiveMixPreviewQueue = Array(songs.prefix(AdaptiveMixPolicy.queueDepth))
+                if songs.count < AdaptiveMixPolicy.queueDepth, !self.isGenerating {
+                    Task { @MainActor [weak self] in
+                        await self?.refreshAdaptiveMixPreview(reason: "queue advanced")
+                    }
+                }
+            }
+            .store(in: &cancellables)
+
+        musicManager.$isAdaptivePlaybackActive
+            .dropFirst()
+            .sink { [weak self] isActive in
+                guard let self, self.isAdaptiveMixPreviewActive, !isActive else {
+                    return
+                }
+
+                self.resetAdaptiveMixPreviewState()
+            }
+            .store(in: &cancellables)
+    }
+
+    private func setupAdaptiveMixMetricBindings() {
+        let metricChanges: [AnyPublisher<Void, Never>] = [
+            $selectedWorkoutPhase.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            $selectedIntensity.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            $currentHeartRate.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            $heartRateTrend.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            $hasStableHeartRateSignal.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            $currentDistance.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            $currentTimeMinutes.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            $timeRemainingInSegmentMinutes.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            $currentSongEndingInSeconds.dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            $isRunnerActive.dropFirst().map { _ in () }.eraseToAnyPublisher()
+        ]
+
+        Publishers.MergeMany(metricChanges)
+            .debounce(for: .milliseconds(500), scheduler: RunLoop.main)
+            .sink { [weak self] _ in
+                guard let self, self.isAdaptiveMixPreviewActive else {
+                    return
+                }
+
+                Task { @MainActor [weak self] in
+                    await self?.refreshAdaptiveMixPreview(reason: "metrics changed")
+                }
             }
             .store(in: &cancellables)
     }
@@ -116,6 +190,18 @@ final class PromptLabViewModel: ObservableObject {
         musicManager.currentSong
     }
 
+    var adaptiveMixPreviewProgress: Double {
+        Double(adaptiveMixPreviewSecondsUntilRefresh) / AdaptiveMixPolicy.refreshInterval
+    }
+
+    var adaptiveMixPreviewDetail: String {
+        guard let score = adaptiveMixPreviewGoalScore else {
+            return adaptiveMixPreviewStatus
+        }
+
+        return "\(score.targetIntensity.label) | \(score.alignmentScore)% match | \(adaptiveMixPreviewRejectedSongCount) replaced"
+    }
+
     var currentPreferences: MusicPreferences {
         profileManager.userProfile.musicPreferences
     }
@@ -134,7 +220,7 @@ final class PromptLabViewModel: ObservableObject {
         }
 
         if effectiveMustUseLibrary, !sourceMode.requiresLibraryOnly {
-            return "Apple Music catalog playback is not enabled, so this test is forcing a library-playable suggestion."
+            return "Apple Music catalog playback is not enabled, so Pancake will choose a song saved in your library."
         }
 
         return sourceMode.detail
@@ -303,10 +389,53 @@ final class PromptLabViewModel: ObservableObject {
 
     func stopPlayback() {
         musicManager.stop()
+        resetAdaptiveMixPreviewState()
     }
 
     func resumePlayback() {
         musicManager.play()
+    }
+
+    func pausePlayback() {
+        musicManager.pause()
+    }
+
+    func endSongCheck() {
+        if isAdaptiveMixPreviewActive {
+            musicManager.stop()
+        }
+
+        resetAdaptiveMixPreviewState()
+    }
+
+    func startAdaptiveMixPreview() async {
+        guard !workoutCoordinator.isWorkoutActive else {
+            error = ActiveWorkoutSongCheckError()
+            return
+        }
+
+        guard isCatalogAuthorized else {
+            error = MusicError.catalogAccessRequired
+            return
+        }
+
+        if isAdaptiveMixPreviewActive {
+            await refreshAdaptiveMixPreview(reason: "manual refresh")
+            return
+        }
+
+        adaptiveMixPreviewPlayedSongs.removeAll()
+        adaptiveMixPreviewPlayedSongKeys.removeAll()
+        adaptiveMixPreviewRevision = 0
+        await curateAdaptiveMixPreview(shouldStartPlayback: true, reason: "preview started")
+    }
+
+    func skipAdaptiveMixPreviewToNext() async {
+        guard isAdaptiveMixPreviewActive else {
+            return
+        }
+
+        await musicManager.skipAdaptiveMixToNext()
     }
 
     func setEasy5KScenario() {
@@ -381,6 +510,208 @@ final class PromptLabViewModel: ObservableObject {
 
     private var elapsedTimeSeconds: TimeInterval {
         currentTimeMinutes * 60
+    }
+
+    private func refreshAdaptiveMixPreview(reason: String) async {
+        guard isAdaptiveMixPreviewActive else {
+            return
+        }
+
+        await curateAdaptiveMixPreview(shouldStartPlayback: false, reason: reason)
+    }
+
+    private func curateAdaptiveMixPreview(shouldStartPlayback: Bool, reason: String) async {
+        guard !isGenerating else {
+            hasPendingAdaptiveMixPreviewRefresh = true
+            return
+        }
+
+        isGenerating = true
+        error = nil
+        adaptiveMixPreviewStatus = "Curating from simulated run metrics"
+
+        defer {
+            isGenerating = false
+
+            if hasPendingAdaptiveMixPreviewRefresh, isAdaptiveMixPreviewActive {
+                hasPendingAdaptiveMixPreviewRefresh = false
+                Task { @MainActor [weak self] in
+                    await self?.refreshAdaptiveMixPreview(reason: "pending metrics refresh")
+                }
+            }
+        }
+
+        let goalScore = AdaptiveMixPolicy.goalScore(
+            targetIntensity: selectedIntensity,
+            targetHeartRate: currentTargetHeartRate,
+            effectiveHeartRate: Int(currentHeartRate.rounded())
+        )
+        adaptiveMixPreviewGoalScore = goalScore
+
+        let hardAvoidedSongs = parsedRecentSongs() + adaptiveMixPreviewPlayedSongs
+        let promptAvoidedSongs = shouldStartPlayback
+            ? hardAvoidedSongs
+            : hardAvoidedSongs + adaptiveMixPreviewQueue
+
+        var candidates: [MusicSuggestion] = []
+        if isAIConfigured {
+            do {
+                candidates = try await aiService.generateAdaptiveMixSuggestions(
+                    context: promptContext,
+                    userPreferences: currentPreferences,
+                    goalScore: goalScore,
+                    avoidedSongs: promptAvoidedSongs
+                )
+            } catch {
+                print("Song Check Adaptive Mix generation fell back: \(error)")
+            }
+        }
+
+        candidates.append(contentsOf: adaptiveMixPreviewFallbackSuggestions(for: goalScore))
+        let avoidedSongKeys = Set(hardAvoidedSongs.map(\.sessionSongKey))
+        candidates = uniqueAdaptiveMixPreviewSuggestions(candidates, excluding: avoidedSongKeys)
+
+        let requiredSongCount = shouldStartPlayback
+            ? AdaptiveMixPolicy.queueDepth + 1
+            : AdaptiveMixPolicy.queueDepth
+        let resolutionReport = await musicManager.resolveAdaptiveMixSuggestions(
+            candidates,
+            excluding: avoidedSongKeys,
+            limit: requiredSongCount
+        )
+
+        guard resolutionReport.hasVerifiedSongCount(requiredSongCount) else {
+            adaptiveMixPreviewStatus = "Keeping current mix: \(resolutionReport.items.count)/\(requiredSongCount) Apple Music songs verified"
+            adaptiveMixPreviewRejectedSongCount = resolutionReport.rejectedSuggestionCount
+            if isAdaptiveMixPreviewActive {
+                restartAdaptiveMixPreviewRefreshTimer()
+            }
+            return
+        }
+
+        let didApplyQueue: Bool
+        if shouldStartPlayback {
+            didApplyQueue = await musicManager.startAdaptiveMix(with: resolutionReport.items)
+        } else {
+            didApplyQueue = musicManager.replaceAdaptiveMixUpcoming(
+                with: Array(resolutionReport.items.prefix(AdaptiveMixPolicy.queueDepth))
+            )
+        }
+
+        guard didApplyQueue else {
+            adaptiveMixPreviewStatus = shouldStartPlayback
+                ? "Unable to start Apple Music playback"
+                : "Unable to replace the upcoming mix"
+            return
+        }
+
+        isAdaptiveMixPreviewActive = true
+        adaptiveMixPreviewRevision += 1
+        adaptiveMixPreviewRejectedSongCount = resolutionReport.rejectedSuggestionCount
+        adaptiveMixPreviewQueue = Array(musicManager.adaptiveUpcomingSongs.prefix(AdaptiveMixPolicy.queueDepth))
+        adaptiveMixPreviewStatus = "Mix \(adaptiveMixPreviewRevision) | \(reason)"
+        recordAdaptiveMixPreviewPlayedSong(musicManager.currentSong)
+        restartAdaptiveMixPreviewRefreshTimer()
+    }
+
+    private func adaptiveMixPreviewFallbackSuggestions(for goalScore: AdaptiveMixGoalScore) -> [MusicSuggestion] {
+        let preferredIntensities: [Intensity]
+
+        switch goalScore.guidance {
+        case .easeDown:
+            preferredIntensities = Intensity.allCases
+        case .lift:
+            preferredIntensities = Array(Intensity.allCases.reversed())
+        case .maintain, .followPlan:
+            preferredIntensities = [goalScore.targetIntensity] + Intensity.allCases
+        }
+
+        return preferredIntensities
+            .flatMap(MusicAIService.fallbackSuggestions(for:))
+    }
+
+    private func uniqueAdaptiveMixPreviewSuggestions(
+        _ suggestions: [MusicSuggestion],
+        excluding excludedSongKeys: Set<String>
+    ) -> [MusicSuggestion] {
+        var seenSongKeys = Set<String>()
+
+        return suggestions
+            .map { $0.cleanedTitle() }
+            .filter { suggestion in
+                AdaptiveMixPolicy.canQueue(
+                    songKey: suggestion.sessionSongKey,
+                    playedSongKeys: excludedSongKeys,
+                    temporarilyReservedSongKeys: seenSongKeys
+                ) &&
+                    seenSongKeys.insert(suggestion.sessionSongKey).inserted
+            }
+    }
+
+    private func recordAdaptiveMixPreviewPlayedSong(_ song: MusicSong?) {
+        guard isAdaptiveMixPreviewActive, let song else {
+            return
+        }
+
+        guard adaptiveMixPreviewPlayedSongKeys.insert(song.sessionSongKey).inserted else {
+            return
+        }
+
+        adaptiveMixPreviewPlayedSongs.append(song)
+    }
+
+    private func restartAdaptiveMixPreviewRefreshTimer() {
+        adaptiveMixPreviewSecondsUntilRefresh = Int(AdaptiveMixPolicy.refreshInterval)
+
+        guard adaptiveMixPreviewRefreshTimer == nil else {
+            return
+        }
+
+        adaptiveMixPreviewRefreshTimer = Timer.scheduledTimer(
+            withTimeInterval: 1,
+            repeats: true
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.tickAdaptiveMixPreviewRefreshTimer()
+            }
+        }
+    }
+
+    private func tickAdaptiveMixPreviewRefreshTimer() {
+        guard isAdaptiveMixPreviewActive else {
+            stopAdaptiveMixPreviewRefreshTimer()
+            return
+        }
+
+        guard adaptiveMixPreviewSecondsUntilRefresh > 0 else {
+            return
+        }
+
+        guard adaptiveMixPreviewSecondsUntilRefresh > 1 else {
+            adaptiveMixPreviewSecondsUntilRefresh = 0
+            Task { @MainActor [weak self] in
+                await self?.refreshAdaptiveMixPreview(reason: "30-second metrics refresh")
+            }
+            return
+        }
+
+        adaptiveMixPreviewSecondsUntilRefresh -= 1
+    }
+
+    private func stopAdaptiveMixPreviewRefreshTimer() {
+        adaptiveMixPreviewRefreshTimer?.invalidate()
+        adaptiveMixPreviewRefreshTimer = nil
+    }
+
+    private func resetAdaptiveMixPreviewState() {
+        isAdaptiveMixPreviewActive = false
+        adaptiveMixPreviewQueue = []
+        adaptiveMixPreviewStatus = "Ready to generate a verified Apple Music mix"
+        adaptiveMixPreviewGoalScore = nil
+        adaptiveMixPreviewRejectedSongCount = 0
+        adaptiveMixPreviewSecondsUntilRefresh = Int(AdaptiveMixPolicy.refreshInterval)
+        hasPendingAdaptiveMixPreviewRefresh = false
+        stopAdaptiveMixPreviewRefreshTimer()
     }
 
     private var effectiveMustUseLibrary: Bool {
