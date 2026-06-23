@@ -7,6 +7,8 @@ import UIKit
 enum AdaptiveMixCurationTrigger: String {
     case userStarted = "user started"
     case periodicMetrics = "30-second metrics refresh"
+    case queueAdvanced = "queue advanced"
+    case queueExhausted = "queue exhausted"
     case upcomingInterval = "upcoming interval"
     case segmentChanged = "segment changed"
 }
@@ -16,11 +18,11 @@ private extension AdaptiveMixCurationTrigger {
         switch self {
         case .periodicMetrics:
             return 0
-        case .userStarted:
+        case .userStarted, .queueAdvanced:
             return 1
         case .upcomingInterval:
             return 2
-        case .segmentChanged:
+        case .segmentChanged, .queueExhausted:
             return 3
         }
     }
@@ -73,6 +75,7 @@ final class WorkoutMusicCoordinator: ObservableObject {
     private var isLiveMetricsWarningDismissed = false
     private var adaptiveMixRevision = 0
     private var pendingAdaptiveMixCuration: (trigger: AdaptiveMixCurationTrigger, targetSegmentIndex: Int)?
+    private var lastAdaptiveMixQueueRefillRequestedAt = Date.distantPast
 
     // Song pre-fetching
     private var prefetchedSuggestions: [MusicSuggestion] = []
@@ -90,6 +93,7 @@ final class WorkoutMusicCoordinator: ObservableObject {
     private static let maximumRecentSongs = 5
     private static let preferredPrefetchDepth = 2
     private static let liveHeartRateGracePeriod: TimeInterval = 90
+    private static let minimumQueueRefillRequestInterval: TimeInterval = 10
 
     var adaptiveMixQueuedSongCount: Int {
         min(musicManager.adaptiveUpcomingSongs.count, AdaptiveMixPolicy.queueDepth)
@@ -229,8 +233,9 @@ final class WorkoutMusicCoordinator: ObservableObject {
             .store(in: &cancellables)
 
         musicManager.$adaptiveUpcomingSongs
-            .sink { [weak self] _ in
+            .sink { [weak self] songs in
                 self?.sendAdaptiveMixStateToWatch()
+                self?.handleAdaptiveMixQueueUpdate(upcomingSongs: songs)
             }
             .store(in: &cancellables)
     }
@@ -453,15 +458,18 @@ final class WorkoutMusicCoordinator: ObservableObject {
         )
         let resolvedItems = resolutionReport.items
 
-        let didApplyQueue: Bool
+        var didApplyQueue: Bool
         if !resolutionReport.hasVerifiedSongCount(requiredSongCount) {
             didApplyQueue = false
         } else if shouldStartPlayback {
             didApplyQueue = await musicManager.startAdaptiveMix(with: resolvedItems)
         } else {
-            didApplyQueue = musicManager.replaceAdaptiveMixUpcoming(
-                with: Array(resolvedItems.prefix(AdaptiveMixPolicy.queueDepth))
-            )
+            let replacementItems = Array(resolvedItems.prefix(AdaptiveMixPolicy.queueDepth))
+            didApplyQueue = musicManager.replaceAdaptiveMixUpcoming(with: replacementItems)
+
+            if !didApplyQueue, !musicManager.hasActiveAdaptiveQueueEntry {
+                didApplyQueue = await musicManager.startAdaptiveMix(with: replacementItems)
+            }
         }
 
         if didApplyQueue {
@@ -480,9 +488,7 @@ final class WorkoutMusicCoordinator: ObservableObject {
                 targetIntensity: goalScore.targetIntensity,
                 rejectedCatalogCandidateCount: resolutionReport.rejectedSuggestionCount
             )
-            if trigger == .userStarted {
-                restartAdaptiveMixRefreshTimer()
-            }
+            restartAdaptiveMixRefreshTimer()
         } else if musicManager.isAdaptivePlaybackActive {
             adaptiveMixStatus = "Keeping current mix: \(resolvedItems.count)/\(requiredSongCount) Apple Music songs verified"
         } else {
@@ -550,7 +556,36 @@ final class WorkoutMusicCoordinator: ObservableObject {
         adaptiveMixStatus = "Adaptive Mix is off"
         adaptiveMixRevision = 0
         pendingAdaptiveMixCuration = nil
+        lastAdaptiveMixQueueRefillRequestedAt = .distantPast
         sendAdaptiveMixStateToWatch()
+    }
+
+    private func handleAdaptiveMixQueueUpdate(upcomingSongs: [MusicSong]) {
+        guard isWorkoutActive,
+              isAdaptiveMixActive,
+              musicManager.isAdaptivePlaybackActive,
+              upcomingSongs.count < AdaptiveMixPolicy.queueDepth,
+              let context = currentWorkoutContext else {
+            return
+        }
+
+        let shouldRestartPlayback = !musicManager.hasActiveAdaptiveQueueEntry
+        let now = Date()
+
+        if !shouldRestartPlayback,
+           now.timeIntervalSince(lastAdaptiveMixQueueRefillRequestedAt) < Self.minimumQueueRefillRequestInterval {
+            return
+        }
+
+        lastAdaptiveMixQueueRefillRequestedAt = now
+
+        Task { @MainActor in
+            await requestAdaptiveMixCuration(
+                trigger: shouldRestartPlayback ? .queueExhausted : .queueAdvanced,
+                targetSegmentIndex: context.currentSegmentIndex,
+                shouldStartPlayback: shouldRestartPlayback
+            )
+        }
     }
 
     private func makeAdaptiveMixContext(

@@ -4,6 +4,21 @@ import MusicKit
 import AVFoundation
 import Combine
 
+struct ResolvedAdaptiveMixItem {
+    let suggestion: MusicSuggestion
+    let catalogSong: Song
+}
+
+struct AdaptiveMixCatalogResolutionReport {
+    let items: [ResolvedAdaptiveMixItem]
+    let attemptedSuggestionCount: Int
+    let rejectedSuggestionCount: Int
+
+    func hasVerifiedSongCount(_ requiredSongCount: Int) -> Bool {
+        items.count == requiredSongCount
+    }
+}
+
 // MARK: - Music Playback Manager
 @MainActor
 final class MusicPlaybackManager: ObservableObject {
@@ -13,31 +28,23 @@ final class MusicPlaybackManager: ObservableObject {
     @Published var currentSong: MusicSong?
     @Published var currentPlaybackTime: TimeInterval = 0
     @Published var currentSongDuration: TimeInterval = 0
-    @Published var isGeneratingSuggestion = false
     @Published var lastSuggestion: MusicSuggestion?
     @Published var playbackError: Error?
     @Published var playbackStateDescription = "stopped"
-
-    /// When true, WorkoutMusicCoordinator is driving song generation.
-    /// The playback manager will NOT auto-generate songs on playback end / now-playing change.
-    /// Only the crossfade timer will still trigger generation as a safety net.
-    var coordinatorDriven = false
+    @Published private(set) var isAdaptivePlaybackActive = false
+    @Published private(set) var adaptiveUpcomingSongs: [MusicSong] = []
 
     private let aiService = MusicAIService.shared
     private let profileManager = UserProfileManager.shared
     /// Single player for both library and Apple Music so state and observers stay in sync
     private var musicPlayer: MPMusicPlayerController
+    private let adaptiveMusicPlayer = ApplicationMusicPlayer.shared
     private var playbackTimer: Timer?
-    private var suggestionTimer: Timer?
-    private var currentWorkoutContext: WorkoutContext?
-    private var lastSuggestionTime: Date = Date.distantPast
     private var hasConfiguredPlaybackAudioSession = false
     /// Track last song ID to suppress duplicate nowPlayingItemChanged notifications
     private var lastReportedSongID: String?
+    private var adaptiveCatalogSongsByID: [String: Song] = [:]
     
-    /// Crossfade: start next song this many seconds before current ends (avoids gap; no true overlap with system player)
-    private var crossfadeDuration: TimeInterval { profileManager.userProfile.musicPreferences.crossfadeDuration }
-
     var hasLibraryAccess: Bool {
         MPMediaLibrary.authorizationStatus() == .authorized
     }
@@ -48,6 +55,10 @@ final class MusicPlaybackManager: ObservableObject {
 
     var hasAvailablePlaybackSource: Bool {
         hasLibraryAccess || hasCatalogAccess
+    }
+
+    var hasActiveAdaptiveQueueEntry: Bool {
+        isAdaptivePlaybackActive && adaptiveMusicPlayer.queue.currentEntry != nil
     }
 
     @discardableResult
@@ -101,6 +112,7 @@ final class MusicPlaybackManager: ObservableObject {
     @discardableResult
     func playAppleMusicSuggestion(_ suggestion: MusicSuggestion) async -> Bool {
         configureAudioSession()
+        stopAdaptivePlayback()
 
         guard hasCatalogAccess else {
             updatePlaybackFailure(MusicError.catalogAccessRequired, state: "enable Apple Music playback")
@@ -138,6 +150,145 @@ final class MusicPlaybackManager: ObservableObject {
             artist: bestMatch.artistName
         )
     }
+
+    func resolveAdaptiveMixSuggestions(
+        _ suggestions: [MusicSuggestion],
+        excluding excludedSongKeys: Set<String>,
+        limit: Int
+    ) async -> AdaptiveMixCatalogResolutionReport {
+        guard hasCatalogAccess, limit > 0 else {
+            return AdaptiveMixCatalogResolutionReport(
+                items: [],
+                attemptedSuggestionCount: 0,
+                rejectedSuggestionCount: 0
+            )
+        }
+
+        var resolved: [ResolvedAdaptiveMixItem] = []
+        var resolvedKeys = Set<String>()
+        var attemptedSuggestionCount = 0
+        var rejectedSuggestionCount = 0
+
+        for suggestion in suggestions {
+            guard resolved.count < limit else { break }
+            attemptedSuggestionCount += 1
+
+            do {
+                let cleanedSuggestion = suggestion.cleanedTitle()
+                let catalogSong = try await bestCatalogSong(for: cleanedSuggestion)
+                let resolvedSuggestion = cleanedSuggestion.resolvedToCatalogTrack(
+                    title: catalogSong.title,
+                    artist: catalogSong.artistName
+                )
+
+                guard AdaptiveMixPolicy.canQueue(
+                    songKey: resolvedSuggestion.sessionSongKey,
+                    playedSongKeys: excludedSongKeys,
+                    temporarilyReservedSongKeys: resolvedKeys
+                ) else {
+                    rejectedSuggestionCount += 1
+                    print("Adaptive Mix skipped reserved or previously played catalog song: \(catalogSong.title) by \(catalogSong.artistName)")
+                    continue
+                }
+
+                resolvedKeys.insert(resolvedSuggestion.sessionSongKey)
+                print("Adaptive Mix verified Apple Music song \(catalogSong.id.rawValue): \(catalogSong.title) by \(catalogSong.artistName)")
+                resolved.append(
+                    ResolvedAdaptiveMixItem(
+                        suggestion: resolvedSuggestion,
+                        catalogSong: catalogSong
+                    )
+                )
+            } catch {
+                rejectedSuggestionCount += 1
+                print("Adaptive Mix skipped unavailable suggestion: \(suggestion.songTitle) by \(suggestion.artist): \(error)")
+            }
+        }
+
+        return AdaptiveMixCatalogResolutionReport(
+            items: resolved,
+            attemptedSuggestionCount: attemptedSuggestionCount,
+            rejectedSuggestionCount: rejectedSuggestionCount
+        )
+    }
+
+    @discardableResult
+    func startAdaptiveMix(with items: [ResolvedAdaptiveMixItem]) async -> Bool {
+        guard hasCatalogAccess, !items.isEmpty else {
+            updatePlaybackFailure(MusicError.catalogAccessRequired, state: "connect Apple Music playback for Adaptive Mix")
+            return false
+        }
+
+        configureAudioSession()
+        musicPlayer.stop()
+        adaptiveMusicPlayer.stop()
+        adaptiveCatalogSongsByID = Dictionary(
+            uniqueKeysWithValues: items.map { ($0.catalogSong.id.rawValue, $0.catalogSong) }
+        )
+        adaptiveMusicPlayer.queue = ApplicationMusicPlayer.Queue(for: items.map(\.catalogSong))
+        adaptiveMusicPlayer.state.repeatMode = MusicKit.MusicPlayer.RepeatMode.none
+        adaptiveMusicPlayer.state.shuffleMode = .off
+
+        do {
+            try await adaptiveMusicPlayer.prepareToPlay()
+            try await adaptiveMusicPlayer.play()
+            isAdaptivePlaybackActive = true
+            playbackError = nil
+            playbackStateDescription = "adaptive mix playing"
+            startPlaybackTimer()
+            syncAdaptiveMusicPlayerState()
+            return adaptiveMusicPlayer.state.playbackStatus == .playing
+        } catch {
+            adaptiveMusicPlayer.stop()
+            isAdaptivePlaybackActive = false
+            adaptiveUpcomingSongs = []
+            updatePlaybackFailure(error, state: "Adaptive Mix playback failed")
+            return false
+        }
+    }
+
+    @discardableResult
+    func replaceAdaptiveMixUpcoming(with items: [ResolvedAdaptiveMixItem]) -> Bool {
+        guard isAdaptivePlaybackActive,
+              !items.isEmpty,
+              let currentEntry = adaptiveMusicPlayer.queue.currentEntry else {
+            return false
+        }
+
+        items.forEach {
+            adaptiveCatalogSongsByID[$0.catalogSong.id.rawValue] = $0.catalogSong
+        }
+
+        var entries = adaptiveMusicPlayer.queue.entries
+        let replacementEntries = items.map { MusicKit.MusicPlayer.Queue.Entry($0.catalogSong) }
+
+        if let currentIndex = entries.firstIndex(where: { $0.id == currentEntry.id }) {
+            let firstUpcomingIndex = entries.index(after: currentIndex)
+            entries.replaceSubrange(firstUpcomingIndex..<entries.endIndex, with: replacementEntries)
+        } else {
+            entries.removeAll()
+            entries.append(currentEntry)
+            entries.append(contentsOf: replacementEntries)
+        }
+
+        adaptiveMusicPlayer.queue.entries = entries
+        syncAdaptiveMusicPlayerState()
+        return true
+    }
+
+    func skipAdaptiveMixToNext() async {
+        guard isAdaptivePlaybackActive else {
+            skipToNext()
+            return
+        }
+
+        do {
+            try await adaptiveMusicPlayer.skipToNextEntry()
+            syncAdaptiveMusicPlayerState()
+        } catch {
+            updatePlaybackFailure(error, state: "Adaptive Mix next song failed")
+        }
+    }
     
     /// Keep UI in sync after Apple Music starts (same player is observed, but initial state may lag)
     private func applyAppleMusicNowPlaying(suggestion: MusicSuggestion, duration: TimeInterval?) {
@@ -160,7 +311,7 @@ final class MusicPlaybackManager: ObservableObject {
     private func fetchCatalogCandidates(for suggestion: MusicSuggestion) async throws -> [Song] {
         let primaryQuery = "\(suggestion.songTitle) \(suggestion.artist)"
         let primaryResults = try await MusicKitService.shared.searchSongs(query: primaryQuery, limit: 10)
-        if bestCatalogMatch(in: primaryResults, for: suggestion) != nil {
+        if bestCatalogMatch(in: primaryResults.filter { $0.playParameters != nil }, for: suggestion) != nil {
             return primaryResults
         }
 
@@ -195,8 +346,9 @@ final class MusicPlaybackManager: ObservableObject {
 
     private func bestCatalogSong(for suggestion: MusicSuggestion) async throws -> Song {
         let songs = try await fetchCatalogCandidates(for: suggestion)
+        let playableSongs = songs.filter { $0.playParameters != nil }
 
-        guard let bestMatch = bestCatalogMatch(in: songs, for: suggestion) else {
+        guard let bestMatch = bestCatalogMatch(in: playableSongs, for: suggestion) else {
             throw MusicError.songUnavailable
         }
 
@@ -379,13 +531,6 @@ final class MusicPlaybackManager: ObservableObject {
             object: musicPlayer
         )
         
-        // Listen for playback end
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(playbackDidEnd),
-            name: .MPMusicPlayerControllerPlaybackStateDidChange,
-            object: musicPlayer
-        )
     }
 
     private func configureAudioSession() {
@@ -404,91 +549,26 @@ final class MusicPlaybackManager: ObservableObject {
     
     // MARK: - Workout Integration
     
-    func startWorkoutMusic(workoutContext: WorkoutContext) {
-        configureAudioSession()
-        currentWorkoutContext = workoutContext
+    func startWorkoutMusic() {
         clearPlaybackFailure()
-
-        // NOTE: Do NOT generate the initial song here.
-        // WorkoutMusicCoordinator.startWorkoutMusic() calls generateStartingSong()
-        // and then feeds the result back via playSuggestedSong(). Generating here too
-        // would race for the AI generation lock and one request would be skipped.
-
-        // Set up suggestion timer for crossfade/end-of-song transitions
-        startSuggestionTimer()
     }
     
     func stopWorkoutMusic() {
         musicPlayer.stop()
+        stopAdaptivePlayback()
         isPlaying = false
         currentSong = nil
         currentSongDuration = 0
         currentPlaybackTime = 0
         playbackStateDescription = "stopped"
         playbackError = nil
-        currentWorkoutContext = nil
         lastReportedSongID = nil
         
-        stopSuggestionTimer()
         stopPlaybackTimer()
     }
     
-    func updateWorkoutContext(_ context: WorkoutContext) {
-        currentWorkoutContext = context
-    }
-    
-    // MARK: - Song Generation and Playback
-    
-    private func generateAndPlayStartingSong() async {
-        guard let context = currentWorkoutContext else { return }
+    // MARK: - Song Playback
 
-        isGeneratingSuggestion = true
-
-        do {
-            let suggestion = try await aiService.generateStartingSongSuggestion(
-                workoutPlan: context.segments,
-                userPreferences: profileManager.userProfile.musicPreferences,
-                currentIntensity: context.currentSegment.intensity,
-                mustUseLibrary: hasLibraryAccess && !hasCatalogAccess
-            )
-
-            await playSuggestedSong(suggestion)
-
-        } catch {
-            playbackError = error
-            print("Failed to generate starting song: \(error)")
-        }
-
-        isGeneratingSuggestion = false
-    }
-    
-    func generateNextSongSuggestion() async {
-        guard let context = currentWorkoutContext else {
-            return
-        }
-
-        isGeneratingSuggestion = true
-
-        do {
-            let suggestion = try await aiService.generateIntervalChangeSuggestion(
-                context: context.musicContext,
-                userPreferences: profileManager.userProfile.musicPreferences,
-                currentDistance: context.totalDistance,
-                currentTime: context.totalTime,
-                upcomingIntensity: context.upcomingSegment?.intensity,
-                mustUseLibrary: hasLibraryAccess && !hasCatalogAccess
-            )
-
-            await playSuggestedSong(suggestion)
-
-        } catch {
-            playbackError = error
-            print("❌ Failed to generate next song: \(error)")
-        }
-
-        isGeneratingSuggestion = false
-    }
-    
     @discardableResult
     func playSuggestedSong(_ suggestion: MusicSuggestion) async -> Bool {
         // Clean up the song title — the AI sometimes appends "by Artist" to the title
@@ -504,9 +584,9 @@ final class MusicPlaybackManager: ObservableObject {
 
         guard hasCatalogAccess else {
             if hasLibraryAccess {
-                updatePlaybackFailure(MusicError.catalogAccessRequired, state: "enable Apple Music playback")
+                updatePlaybackFailure(MusicError.catalogAccessRequired, state: "connect Apple Music playback")
             } else {
-                updatePlaybackFailure(MusicError.noPlayableMusicSource, state: "music access needed")
+                updatePlaybackFailure(MusicError.noPlayableMusicSource, state: "connect music to play a suggestion")
             }
             return false
         }
@@ -715,6 +795,7 @@ final class MusicPlaybackManager: ObservableObject {
     @discardableResult
     private func playSong(_ mediaItem: MPMediaItem) async -> Bool {
         configureAudioSession()
+        stopAdaptivePlayback()
         
         // Check if the media item has required properties
         guard mediaItem.title != nil && mediaItem.artist != nil else {
@@ -787,12 +868,30 @@ final class MusicPlaybackManager: ObservableObject {
     
     func play() {
         configureAudioSession()
+        if isAdaptivePlaybackActive {
+            Task {
+                do {
+                    try await adaptiveMusicPlayer.play()
+                    syncAdaptiveMusicPlayerState()
+                } catch {
+                    updatePlaybackFailure(error, state: "Adaptive Mix playback failed")
+                }
+            }
+            return
+        }
+
         musicPlayer.play()
         playbackError = nil
         playbackStateDescription = "playing"
     }
     
     func pause() {
+        if isAdaptivePlaybackActive {
+            adaptiveMusicPlayer.pause()
+            syncAdaptiveMusicPlayerState()
+            return
+        }
+
         musicPlayer.pause()
         playbackStateDescription = "paused"
     }
@@ -807,6 +906,7 @@ final class MusicPlaybackManager: ObservableObject {
     
     func stop() {
         musicPlayer.stop()
+        stopAdaptivePlayback()
         isPlaying = false
         currentSong = nil
         currentSongDuration = 0
@@ -826,21 +926,6 @@ final class MusicPlaybackManager: ObservableObject {
     
     // MARK: - Timers
     
-    private func startSuggestionTimer() {
-        stopSuggestionTimer()
-        let interval: TimeInterval = 5.0
-        suggestionTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                await self?.checkForNextSongSuggestion()
-            }
-        }
-    }
-    
-    private func stopSuggestionTimer() {
-        suggestionTimer?.invalidate()
-        suggestionTimer = nil
-    }
-    
     private func startPlaybackTimer() {
         stopPlaybackTimer()
         
@@ -857,36 +942,19 @@ final class MusicPlaybackManager: ObservableObject {
     }
     
     private func updatePlaybackTime() {
-        currentPlaybackTime = musicPlayer.currentPlaybackTime
-    }
-    
-    private func checkForNextSongSuggestion() async {
-        // When coordinator is driving, it handles all song transitions via its own timers.
-        // This timer serves as a safety net only for non-coordinator mode.
-        guard !coordinatorDriven else { return }
-        guard currentWorkoutContext != nil && !isGeneratingSuggestion else {
+        if isAdaptivePlaybackActive {
+            syncAdaptiveMusicPlayerState()
             return
         }
 
-        // Check if we need a new song suggestion
-        let timeRemainingInSong = currentSongDuration - currentPlaybackTime
-
-        // Trigger next song at crossfade point (e.g. 4s before end) so transition happens before song ends
-        let shouldGenerate = (timeRemainingInSong <= crossfadeDuration || currentSongDuration == 0 || currentSong == nil)
-
-        if shouldGenerate {
-            // Check if we've generated a suggestion recently to prevent rapid looping
-            let timeSinceLastSuggestion = Date().timeIntervalSince(lastSuggestionTime)
-            if timeSinceLastSuggestion > 15 { // 15 seconds minimum between suggestions
-                lastSuggestionTime = Date()
-                await generateNextSongSuggestion()
-            }
-        }
+        currentPlaybackTime = musicPlayer.currentPlaybackTime
     }
     
     // MARK: - Notification Handlers
     
     @objc private func playbackStateChanged() {
+        guard !isAdaptivePlaybackActive else { return }
+
         isPlaying = musicPlayer.playbackState == .playing
         let nextState = switch musicPlayer.playbackState {
         case .playing:
@@ -901,25 +969,9 @@ final class MusicPlaybackManager: ObservableObject {
         }
     }
     
-    @objc private func playbackDidEnd() {
-        // When the coordinator is driving, don't auto-generate — it handles song transitions
-        guard !coordinatorDriven else {
-            return
-        }
-
-        // Check if playback stopped and we're in a workout
-        if musicPlayer.playbackState == .stopped && currentWorkoutContext != nil && !isGeneratingSuggestion {
-            let timeSinceLastSuggestion = Date().timeIntervalSince(lastSuggestionTime)
-            if timeSinceLastSuggestion > 10 { // 10 seconds minimum between suggestions
-                lastSuggestionTime = Date()
-                Task {
-                    await generateNextSongSuggestion()
-                }
-            }
-        }
-    }
-    
     @objc private func nowPlayingItemChanged() {
+        guard !isAdaptivePlaybackActive else { return }
+
         if let nowPlayingItem = musicPlayer.nowPlayingItem {
             let songID = "\(nowPlayingItem.persistentID)"
 
@@ -944,42 +996,98 @@ final class MusicPlaybackManager: ObservableObject {
             if playbackError == nil {
                 playbackStateDescription = "stopped"
             }
-
-            // When the coordinator is driving, don't auto-generate — it handles song transitions
-            guard !coordinatorDriven else { return }
-
-            // Only generate next song if we're in a workout AND not already generating a suggestion
-            // AND the playback state indicates the song actually ended (not just paused)
-            // AND we haven't generated a suggestion recently
-            if currentWorkoutContext != nil && !isGeneratingSuggestion && musicPlayer.playbackState == .stopped {
-                let timeSinceLastSuggestion = Date().timeIntervalSince(lastSuggestionTime)
-                if timeSinceLastSuggestion > 10 { // 10 seconds minimum between suggestions
-                    lastSuggestionTime = Date()
-                    Task {
-                        await generateNextSongSuggestion()
-                    }
-                }
-            }
         }
     }
-    
-    // MARK: - Music Fade Controls
-    
-    func fadeOutMusic() {
-        // For MPMusicPlayerController, we can't directly control volume
-        // We'll use a subtle approach - brief pause during speech
-        musicPlayer.pause()
+
+    private func stopAdaptivePlayback() {
+        guard isAdaptivePlaybackActive || adaptiveMusicPlayer.queue.currentEntry != nil else {
+            return
+        }
+
+        adaptiveMusicPlayer.stop()
+        isAdaptivePlaybackActive = false
+        adaptiveUpcomingSongs = []
+        adaptiveCatalogSongsByID.removeAll()
     }
-    
-    func fadeInMusic() {
-        // Resume music after speech
-        musicPlayer.play()
+
+    private func syncAdaptiveMusicPlayerState() {
+        guard isAdaptivePlaybackActive else { return }
+
+        currentPlaybackTime = adaptiveMusicPlayer.playbackTime
+        isPlaying = adaptiveMusicPlayer.state.playbackStatus == .playing
+
+        switch adaptiveMusicPlayer.state.playbackStatus {
+        case .playing:
+            playbackStateDescription = "adaptive mix playing"
+        case .paused:
+            playbackStateDescription = "adaptive mix paused"
+        case .stopped:
+            playbackStateDescription = "adaptive mix stopped"
+        default:
+            playbackStateDescription = "adaptive mix active"
+        }
+
+        guard let currentEntry = adaptiveMusicPlayer.queue.currentEntry else {
+            currentSong = nil
+            currentSongDuration = 0
+            adaptiveUpcomingSongs = []
+            return
+        }
+
+        if let catalogSong = catalogSong(from: currentEntry) {
+            let song = musicSong(from: catalogSong)
+            if currentSong?.id != song.id {
+                currentSong = song
+                currentSongDuration = song.duration
+            }
+        }
+
+        let entries = adaptiveMusicPlayer.queue.entries
+        guard let currentIndex = entries.firstIndex(where: { $0.id == currentEntry.id }) else {
+            adaptiveUpcomingSongs = []
+            return
+        }
+
+        adaptiveUpcomingSongs = entries[entries.index(after: currentIndex)...]
+            .compactMap(catalogSong(from:))
+            .map(musicSong(from:))
+    }
+
+    private func catalogSong(from entry: MusicKit.MusicPlayer.Queue.Entry) -> Song? {
+        if let item = entry.item {
+            switch item {
+            case .song(let song):
+                return song
+            case .musicVideo:
+                return nil
+            @unknown default:
+                return nil
+            }
+        }
+
+        if let transientSong = entry.transientItem as? Song {
+            return transientSong
+        }
+
+        return adaptiveCatalogSongsByID.values.first { song in
+            song.title == entry.title && song.artistName == entry.subtitle
+        }
+    }
+
+    private func musicSong(from catalogSong: Song) -> MusicSong {
+        MusicSong(
+            id: catalogSong.id.rawValue,
+            title: catalogSong.title,
+            artist: catalogSong.artistName,
+            album: catalogSong.albumTitle,
+            artwork: nil,
+            duration: catalogSong.duration ?? 0
+        )
     }
     
     @MainActor
     deinit {
         NotificationCenter.default.removeObserver(self)
-        stopSuggestionTimer()
         stopPlaybackTimer()
     }
 }
