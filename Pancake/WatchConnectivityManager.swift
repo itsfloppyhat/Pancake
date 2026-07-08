@@ -3,11 +3,8 @@ import Combine
 
 // MARK: - Notification Names
 extension Notification.Name {
-    static let requestMusicSuggestion = Notification.Name("requestMusicSuggestion")
     static let playbackControl = Notification.Name("playbackControl")
     static let workoutControl = Notification.Name("workoutControl")
-    static let workoutHeartRate = Notification.Name("workoutHeartRate")
-    static let segmentChanged = Notification.Name("segmentChanged")
     static let workoutUpdate = Notification.Name("workoutUpdate")
 }
 
@@ -77,11 +74,11 @@ enum WatchConnectivityError: LocalizedError {
         case .notSupported:
             return "Watch Connectivity is not supported on this device"
         case .watchNotPaired:
-            return "Apple Watch is not paired with this iPhone"
+            return "A watch is not paired with this iPhone"
         case .watchAppNotInstalled:
-            return "Pancake app is not installed on your Apple Watch"
+            return "Pancake is not installed on your watch"
         case .watchNotReachable:
-            return "Apple Watch is not reachable"
+            return "Watch is not reachable"
         case .encodingFailed:
             return "Failed to encode run plan data"
         }

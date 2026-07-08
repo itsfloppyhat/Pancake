@@ -13,8 +13,6 @@ final class RunSetupViewModel: ObservableObject {
     @Published private var runPlanViewModel = RunPlanViewModel()
     private let watchConnectivity = WatchConnectivityManager.shared
     private let musicCoordinator = WorkoutMusicCoordinator.shared
-    private let musicManager = MusicPlaybackManager.shared
-    private let onboarding = OnboardingManager.shared
     
     private var cancellables = Set<AnyCancellable>()
     
@@ -34,11 +32,6 @@ final class RunSetupViewModel: ObservableObject {
             }
             .store(in: &cancellables)
 
-        onboarding.objectWillChange
-            .sink { [weak self] _ in
-                self?.objectWillChange.send()
-            }
-            .store(in: &cancellables)
     }
     
     // MARK: - Run Plan Access
@@ -68,7 +61,7 @@ final class RunSetupViewModel: ObservableObject {
     }
     
     var canStartRun: Bool {
-        hasSegments && isWatchPaired && isWatchAppInstalled && onboarding.requiredRunSetupComplete && !isStartingRun
+        hasSegments && isWatchPaired && isWatchAppInstalled && !isStartingRun
     }
     
     // MARK: - Music Coordinator
@@ -104,37 +97,25 @@ final class RunSetupViewModel: ObservableObject {
     func startRunOnWatch() {
         guard hasSegments && !isStartingRun else { return }
 
-        guard onboarding.requiredRunSetupComplete else {
-            watchAlertMessage = onboarding.missingRunSetupMessage
-            showingWatchAlert = true
-            return
-        }
-
         guard isWatchPaired && isWatchAppInstalled else {
-            watchAlertMessage = "Pair an Apple Watch and install Pancake on it before starting a run."
-            showingWatchAlert = true
-            return
-        }
-
-        guard musicManager.hasAvailablePlaybackSource else {
-            watchAlertMessage = MusicError.noPlayableMusicSource.localizedDescription
+            watchAlertMessage = "Pair a watch and install Pancake on it before starting a run."
             showingWatchAlert = true
             return
         }
 
         isStartingRun = true
 
-        // Store the pending segments so music can start when Watch confirms workout
+        // Store the pending segments so optional suggestions have workout context.
         musicCoordinator.setPendingRunPlan(segments)
 
-        // Send run plan to Watch — music will NOT start until Watch confirms workout started
+        // Send the plan to the watch companion. Music remains optional.
         watchConnectivity.sendRunPlan(segments)
 
         // Handle response
         if let error = watchConnectivity.lastError {
             watchAlertMessage = "Error: \(error.localizedDescription)"
         } else {
-            watchAlertMessage = "Run plan sent to Apple Watch! Open the Pancake app on your Watch and start the workout. Music will begin automatically when the workout starts."
+            watchAlertMessage = "Run plan sent to your watch. Open Pancake there and start the workout. You can request a music suggestion during the run."
         }
 
         showingWatchAlert = true

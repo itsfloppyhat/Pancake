@@ -1,7 +1,6 @@
 import Foundation
 import HealthKit
 import CoreLocation
-import CoreMotion
 import WatchConnectivity
 import WatchKit
 
@@ -118,13 +117,6 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
     private let maxBufferSize = 10
     private let minAccuracyThreshold: CLLocationAccuracy = 100.0
 
-    // MARK: - Motion Tracking
-    private let motionManager = CMMotionManager()
-    @Published private(set) var cadence: Double = 0 // steps per minute
-    @Published private(set) var stepCount: Int = 0
-    private var lastStepTime: Date?
-    private var stepTimes: [Date] = []
-    
     // Additional properties for music integration
     @Published private(set) var currentHeartRate: Int?
     @Published private(set) var targetHeartRate: Int?
@@ -136,6 +128,7 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
 
     // Timer for sending updates to iPhone
     private var iPhoneUpdateTimer: Timer?
+    private var simulatedMetricsTimer: Timer?
 
     // Km milestone notification
     @Published var showKmMilestone: Bool = false
@@ -151,10 +144,15 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
     @Published private(set) var workoutStartDate: Date?
     @Published private(set) var isStarting: Bool = false
     @Published private(set) var isRunning: Bool = false
+    @Published private(set) var isPaused: Bool = false
+    @Published private(set) var isPlanComplete: Bool = false
     @Published var error: Error?
+    private var pausedAt: Date?
     private var lastHeartRateSampleAt: Date?
     private var hasSentHeartRateWarningToPhone = false
     private static let heartRateSignalGracePeriod: TimeInterval = 90
+    /// After this long without a fresh sample, stop reporting the last known heart rate.
+    private static let heartRateStalenessInterval: TimeInterval = 30
     
     // MARK: - Workout State
     @Published private(set) var currentSegmentIndex: Int = 0
@@ -164,11 +162,15 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
     private var segmentStartTime: Date?
     private var segmentStartDistance: Double = 0
     private var lastPrecuratedUpcomingSegmentIndex: Int?
+    private static let simulatedRunArgument = "--pancake-simulated-run"
+    private static let simulatedRunEnvironmentKey = "PANCAKE_SIMULATED_RUN"
+    private static let simulatedSpeedEnvironmentKey = "PANCAKE_SIMULATED_SPEED_MPS"
+    private static let simulatedHeartRates = [126, 132, 138, 146, 154, 162, 169, 158, 148, 136, 128]
+    private var simulatedHeartRateIndex = 0
 
     private override init() {
         super.init()
         setupLocationManager()
-        setupMotionManager()
     }
     
     private func setupLocationManager() {
@@ -212,11 +214,6 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
         }
     }
     
-    private func setupMotionManager() {
-        motionManager.deviceMotionUpdateInterval = 0.01 // 100 Hz for maximum responsiveness
-        motionManager.accelerometerUpdateInterval = 0.01 // 100 Hz for more precise step detection
-    }
-
     func startOutdoorRun(segments: [RunSegment]) {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
@@ -228,6 +225,11 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
 
             guard !segments.isEmpty else {
                 self.error = WorkoutError.noSegments
+                return
+            }
+
+            if Self.isSimulatedRunEnabled {
+                self.startSimulatedOutdoorRun(segments: segments)
                 return
             }
 
@@ -244,6 +246,9 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
             // Clear any previous errors
             self.error = nil
             self.isStarting = true
+            self.isPaused = false
+            self.isPlanComplete = false
+            self.pausedAt = nil
             self.heartRate = nil
             self.currentHeartRate = nil
             self.liveMetricsWarning = nil
@@ -309,7 +314,6 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
 
         startWorkoutTimer()
         locationManager.startUpdatingLocation()
-        startMotionTracking()
 
         // Start AI music curation only after the Watch workout is actually running.
         startAIMusicCuration()
@@ -328,64 +332,153 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
         builder = nil
 
         locationManager.stopUpdatingLocation()
-        stopMotionTracking()
         stopWorkoutTimer()
         stopIPhoneUpdateTimer()
+        stopSimulatedMetricsTimer()
 
         workoutStartDate = nil
         segmentStartTime = nil
         segmentStartDistance = 0
+        isPaused = false
+        isPlanComplete = false
+        pausedAt = nil
         liveMetricsWarning = nil
         lastHeartRateSampleAt = nil
         hasSentHeartRateWarningToPhone = false
+        simulatedHeartRateIndex = 0
     }
-    
-    private func startMotionTracking() {
-        guard motionManager.isAccelerometerAvailable else { return }
-        
-        motionManager.startAccelerometerUpdates(to: .main) { [weak self] (data, error) in
-            guard let self = self, let data = data else { return }
-            
-            // Simple step detection using accelerometer
-            let acceleration = sqrt(pow(data.acceleration.x, 2) + 
-                                  pow(data.acceleration.y, 2) + 
-                                  pow(data.acceleration.z, 2))
-            
-            // Threshold for step detection (adjust based on testing)
-            let stepThreshold: Double = 1.2
-            
-            if acceleration > stepThreshold {
-                let now = Date()
-                
-                // Avoid duplicate steps within 0.3 seconds
-                if let lastStep = self.lastStepTime, now.timeIntervalSince(lastStep) < 0.3 {
-                    return
-                }
-                
-                self.lastStepTime = now
-                self.stepCount += 1
-                self.stepTimes.append(now)
-                
-                // Keep only recent step times (last 10 seconds)
-                self.stepTimes = self.stepTimes.filter { now.timeIntervalSince($0) <= 10.0 }
-                
-                // Calculate cadence (steps per minute)
-                if self.stepTimes.count >= 2 {
-                    let timeSpan = self.stepTimes.last!.timeIntervalSince(self.stepTimes.first!)
-                    if timeSpan > 0 {
-                        self.cadence = Double(self.stepTimes.count - 1) * 60.0 / timeSpan
-                    }
-                }
-            }
+
+    private static var isSimulatedRunEnabled: Bool {
+        #if DEBUG
+        let processInfo = ProcessInfo.processInfo
+        return processInfo.arguments.contains(simulatedRunArgument) ||
+            processInfo.environment[simulatedRunEnvironmentKey] == "1"
+        #else
+        return false
+        #endif
+    }
+
+    private static var simulatedSpeedMetersPerSecond: Double {
+        #if DEBUG
+        if let rawValue = ProcessInfo.processInfo.environment[simulatedSpeedEnvironmentKey],
+           let speed = Double(rawValue),
+           speed > 0 {
+            return speed
+        }
+        #endif
+
+        return 3.15
+    }
+
+    private func startSimulatedOutdoorRun(segments: [RunSegment]) {
+        plannedSegments = segments
+        currentSegmentIndex = 0
+        targetHeartRate = segments.first?.intensity.defaultTargetHeartRate
+        segmentStartTime = Date()
+        segmentStartDistance = 0
+        lastPrecuratedUpcomingSegmentIndex = nil
+        simulatedHeartRateIndex = 0
+
+        error = nil
+        isStarting = true
+        isPaused = false
+        isPlanComplete = false
+        pausedAt = nil
+        heartRate = nil
+        currentHeartRate = nil
+        activeCalories = 0
+        distanceMeters = 0
+        totalDistance = 0
+        totalTime = 0
+        locations = []
+        locationBuffer = []
+        gpsAccuracy = 4
+        gpsStatus = .excellent
+        isGPSAvailable = true
+        liveMetricsWarning = nil
+        lastHeartRateSampleAt = nil
+        hasSentHeartRateWarningToPhone = false
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            self?.confirmSimulatedWorkoutStarted()
         }
     }
-    
-    private func stopMotionTracking() {
-        motionManager.stopAccelerometerUpdates()
-        stepCount = 0
-        cadence = 0
-        stepTimes.removeAll()
-        lastStepTime = nil
+
+    private func confirmSimulatedWorkoutStarted() {
+        guard isStarting else { return }
+
+        let startDate = Date()
+        isStarting = false
+        isRunning = true
+        workoutStartDate = startDate
+        segmentStartTime = startDate
+
+        startWorkoutTimer()
+        startSimulatedMetricsTimer()
+        startAIMusicCuration()
+        startIPhoneUpdateTimer()
+
+        PancakeSimulatorLog("PANCAKE_SIM: Watch simulated workout started segments=\(plannedSegments.count) speedMps=\(Self.simulatedSpeedMetersPerSecond)")
+    }
+
+    private func startSimulatedMetricsTimer() {
+        stopSimulatedMetricsTimer()
+        simulatedMetricsTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            DispatchQueue.main.async {
+                self?.updateSimulatedMetrics()
+            }
+        }
+        updateSimulatedMetrics()
+    }
+
+    private func stopSimulatedMetricsTimer() {
+        simulatedMetricsTimer?.invalidate()
+        simulatedMetricsTimer = nil
+    }
+
+    private func updateSimulatedMetrics() {
+        guard isRunning, !isPaused else { return }
+
+        let speed = Self.simulatedSpeedMetersPerSecond
+        distanceMeters += speed
+        totalDistance = distanceMeters / 1000.0
+        activeCalories += speed * 0.23
+
+        let baseHeartRate = targetHeartRate ?? currentSegment?.intensity.defaultTargetHeartRate ?? 138
+        let patternDelta = Self.simulatedHeartRates[simulatedHeartRateIndex % Self.simulatedHeartRates.count] - 146
+        let simulatedHeartRate = max(105, min(184, baseHeartRate + patternDelta))
+        simulatedHeartRateIndex += 1
+        heartRate = Double(simulatedHeartRate)
+        currentHeartRate = simulatedHeartRate
+        lastHeartRateSampleAt = Date()
+        liveMetricsWarning = nil
+
+        let location = CLLocation(
+            coordinate: simulatedCoordinate(distanceMeters: distanceMeters),
+            altitude: 10,
+            horizontalAccuracy: 4,
+            verticalAccuracy: 4,
+            timestamp: Date()
+        )
+        locations.append(location)
+        locations = Array(locations.suffix(200))
+    }
+
+    private func simulatedCoordinate(distanceMeters: Double) -> CLLocationCoordinate2D {
+        // Small Central Park loop; the script also feeds simctl a matching GPS loop.
+        let originLatitude = 40.7829
+        let originLongitude = -73.9654
+        let loopMeters = 1600.0
+        let progress = (distanceMeters.truncatingRemainder(dividingBy: loopMeters)) / loopMeters
+        let angle = progress * 2.0 * Double.pi
+        let radiusMeters = 180.0
+        let latitudeOffset = cos(angle) * radiusMeters / 111_111.0
+        let longitudeOffset = sin(angle) * radiusMeters / (111_111.0 * cos(originLatitude * .pi / 180.0))
+
+        return CLLocationCoordinate2D(
+            latitude: originLatitude + latitudeOffset,
+            longitude: originLongitude + longitudeOffset
+        )
     }
     
     // MARK: - Workout Timer
@@ -394,6 +487,7 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
         workoutTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             DispatchQueue.main.async {
                 guard let self = self, let startDate = self.workoutStartDate else { return }
+                guard !self.isPaused else { return }
                 self.totalTime = Date().timeIntervalSince(startDate)
 
                 // Give the iPhone time to refresh the next-song queue before an interval changes.
@@ -421,21 +515,39 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
         if currentSegmentProgress >= 1.0 {
             // Check if there are more segments
             if currentSegmentIndex + 1 < plannedSegments.count {
-                WKInterfaceDevice.current().play(.success)
+                let previousZone = currentSegment?.intensity.zoneNumber ?? 0
 
                 // Move to next segment
                 currentSegmentIndex += 1
                 targetHeartRate = currentSegment?.intensity.defaultTargetHeartRate
-                
+
+                // Directional haptics so the runner can follow the plan without looking:
+                // rising zone = push harder, falling zone = ease off.
+                let newZone = currentSegment?.intensity.zoneNumber ?? previousZone
+                if newZone > previousZone {
+                    WKInterfaceDevice.current().play(.directionUp)
+                } else if newZone < previousZone {
+                    WKInterfaceDevice.current().play(.directionDown)
+                } else {
+                    WKInterfaceDevice.current().play(.success)
+                }
+
                 // Reset segment tracking for new segment
                 segmentStartTime = Date()
                 segmentStartDistance = distanceMeters
-                
+
                 // Update music context for new segment
                 updateMusicContextForSegmentChange()
             } else {
                 // All segments complete - workout finished
-                // Could trigger workout completion here if needed
+                if !isPlanComplete {
+                    isPlanComplete = true
+                    WKInterfaceDevice.current().play(.notification)
+                }
+
+                if Self.isSimulatedRunEnabled {
+                    finishSimulatedWorkout()
+                }
             }
         }
     }
@@ -460,7 +572,7 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
         )
     }
 
-    private var estimatedSecondsUntilCurrentSegmentEnds: TimeInterval? {
+    var estimatedSecondsUntilCurrentSegmentEnds: TimeInterval? {
         guard let currentSegment else { return nil }
 
         switch currentSegment.target {
@@ -501,9 +613,20 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
     }
 
     private func checkForHeartRateSignal() {
-        guard isRunning,
-              lastHeartRateSampleAt == nil,
-              workoutDuration >= Self.heartRateSignalGracePeriod else { return }
+        guard isRunning else { return }
+
+        // Signal dropped mid-run: stop showing and reporting the stale value.
+        if let lastSampleAt = lastHeartRateSampleAt {
+            if currentHeartRate != nil,
+               Date().timeIntervalSince(lastSampleAt) > Self.heartRateStalenessInterval {
+                heartRate = nil
+                currentHeartRate = nil
+                liveMetricsWarning = "Heart-rate signal lost. Music uses your run plan until it returns."
+            }
+            return
+        }
+
+        guard workoutDuration >= Self.heartRateSignalGracePeriod else { return }
 
         liveMetricsWarning = "No heart-rate signal yet. Music is using your run plan and segment intensity until watch heart-rate data starts."
 
@@ -641,6 +764,46 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
         }
     }
 
+    // MARK: - Pause / Resume
+
+    func pauseWorkout() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.isRunning, !self.isPaused else { return }
+            self.applyPausedState()
+            self.session?.pause()
+            WKInterfaceDevice.current().play(.stop)
+        }
+    }
+
+    func resumeWorkout() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.isRunning, self.isPaused else { return }
+            self.applyResumedState()
+            self.session?.resume()
+            WKInterfaceDevice.current().play(.start)
+        }
+    }
+
+    private func applyPausedState() {
+        guard !isPaused else { return }
+        isPaused = true
+        pausedAt = Date()
+    }
+
+    /// Shifting the start anchors forward by the paused duration keeps every
+    /// elapsed-time calculation (total time, segment progress, pre-curation
+    /// countdown) consistent without tracking pause windows separately.
+    private func applyResumedState() {
+        guard isPaused else { return }
+        if let pausedAt {
+            let pauseDuration = Date().timeIntervalSince(pausedAt)
+            workoutStartDate = workoutStartDate?.addingTimeInterval(pauseDuration)
+            segmentStartTime = segmentStartTime?.addingTimeInterval(pauseDuration)
+        }
+        pausedAt = nil
+        isPaused = false
+    }
+
     func stopWorkout() {
         DispatchQueue.main.async { [weak self] in
             guard let self = self, self.isRunning else { return }
@@ -651,9 +814,9 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
             self.session?.end()
             self.finishHealthWorkout(builder: builderToFinish, endDate: endDate)
             self.locationManager.stopUpdatingLocation()
-            self.stopMotionTracking()
             self.stopWorkoutTimer()
             self.stopIPhoneUpdateTimer()
+            self.stopSimulatedMetricsTimer()
             self.isRunning = false
             
             // Reset state
@@ -663,6 +826,9 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
             self.workoutStartDate = nil
             self.segmentStartTime = nil
             self.segmentStartDistance = 0
+            self.isPaused = false
+            self.isPlanComplete = false
+            self.pausedAt = nil
             self.lastPrecuratedUpcomingSegmentIndex = nil
             self.lastNotifiedKm = 0
             self.showKmMilestone = false
@@ -672,9 +838,24 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
             self.liveMetricsWarning = nil
             self.lastHeartRateSampleAt = nil
             self.hasSentHeartRateWarningToPhone = false
+            self.simulatedHeartRateIndex = 0
             self.kmDismissTimer?.invalidate()
             self.kmDismissTimer = nil
         }
+    }
+
+    private func finishSimulatedWorkout() {
+        guard isRunning else { return }
+
+        let totalSeconds = Int(totalTime)
+        let totalDistanceKm = displayedDistanceKm
+        PancakeSimulatorLog("PANCAKE_SIM: Watch simulated workout completed distanceKm=\(String(format: "%.3f", totalDistanceKm)) totalSeconds=\(totalSeconds)")
+
+        WatchConnectivityManager.shared.sendWorkoutCompleted(
+            totalDistanceKm: totalDistanceKm,
+            totalTimeSeconds: totalSeconds
+        )
+        stopWorkout()
     }
 
     private func finishHealthWorkout(builder: HKLiveWorkoutBuilder?, endDate: Date) {
@@ -699,13 +880,22 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
     /// Current workout duration in seconds
     var workoutDuration: TimeInterval {
         guard let startDate = workoutStartDate else { return 0 }
+        if let pausedAt {
+            return pausedAt.timeIntervalSince(startDate)
+        }
         return Date().timeIntervalSince(startDate)
     }
-    
+
     /// Current segment (if any)
     var currentSegment: RunSegment? {
         guard currentSegmentIndex < plannedSegments.count else { return nil }
         return plannedSegments[currentSegmentIndex]
+    }
+
+    /// Next planned segment (if any)
+    var upcomingSegment: RunSegment? {
+        guard currentSegmentIndex + 1 < plannedSegments.count else { return nil }
+        return plannedSegments[currentSegmentIndex + 1]
     }
     
     /// Progress through current segment (0.0 to 1.0)
@@ -842,9 +1032,12 @@ extension WorkoutSessionManager: HKWorkoutSessionDelegate, HKLiveWorkoutBuilderD
         DispatchQueue.main.async { [weak self] in
             switch toState {
             case .running:
+                self?.applyResumedState()
                 if self?.isStarting == false {
                     self?.isRunning = true
                 }
+            case .paused:
+                self?.applyPausedState()
             case .ended:
                 self?.isStarting = false
                 self?.isRunning = false

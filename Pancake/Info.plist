@@ -5,7 +5,7 @@
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>NSAppleMusicUsageDescription</key>
-	<string>Pancake uses Apple Music to learn your taste from your library and playlists, and to play generated song suggestions during your runs.</string>
+	<string>Pancake uses Apple Music to learn your taste from your library and playlists, and to play song suggestions or an Adaptive Mix when you choose.</string>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 </dict>

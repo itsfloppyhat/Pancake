@@ -1,8 +1,11 @@
 import SwiftUI
 
 struct UserProfileView: View {
+    @Environment(\.openURL) private var openURL
     @StateObject private var viewModel = UserProfileViewModel()
     @StateObject private var onboarding = OnboardingManager.shared
+    @State private var showingResetProfileAlert = false
+    @State private var showingCheerSquad = false
     
     var body: some View {
         NavigationView {
@@ -54,7 +57,7 @@ struct UserProfileView: View {
 
                         SettingsSectionView(
                             title: "AI Music Curation",
-                            subtitle: viewModel.isAIConfigured ? "Apple Intelligence Ready" : "Check AI Settings",
+                            subtitle: viewModel.isAIConfigured ? "On-device AI ready" : "Check AI Settings",
                             icon: "brain.head.profile",
                             color: .pastelRose
                         ) {
@@ -63,11 +66,47 @@ struct UserProfileView: View {
 
                         SettingsSectionView(
                             title: "Song Check",
-                            subtitle: "Preview a generated song without starting a run",
+                            subtitle: "Preview Adaptive Mix with simulated run metrics",
                             icon: "slider.horizontal.3",
                             color: .pastelPeach
                         ) {
                             viewModel.showPromptLab()
+                        }
+
+                        SettingsSectionView(
+                            title: "Cheer Squad",
+                            subtitle: "Friends get alerted when you run and can send cheers",
+                            icon: "megaphone.fill",
+                            color: .pastelRose
+                        ) {
+                            showingCheerSquad = true
+                        }
+
+                        SettingsSectionView(
+                            title: "Privacy Policy",
+                            subtitle: "How Pancake handles Health, location, and music data",
+                            icon: "lock.shield",
+                            color: .pastelMint
+                        ) {
+                            openURL(AppExternalLinks.privacyPolicy)
+                        }
+
+                        SettingsSectionView(
+                            title: "Support",
+                            subtitle: "Email and troubleshooting information",
+                            icon: "questionmark.circle",
+                            color: .pastelPeriwinkle
+                        ) {
+                            openURL(AppExternalLinks.support)
+                        }
+
+                        SettingsSectionView(
+                            title: "Reset Profile Data",
+                            subtitle: "Delete stored personal info, goals, and music preferences",
+                            icon: "trash",
+                            color: .pastelCoral
+                        ) {
+                            showingResetProfileAlert = true
                         }
                         
                         HealthKitImportSectionView()
@@ -94,6 +133,17 @@ struct UserProfileView: View {
             .sheet(isPresented: $viewModel.showingPromptLab) {
                 PromptLabView()
             }
+            .sheet(isPresented: $showingCheerSquad) {
+                CheerSquadView()
+            }
+            .alert("Reset Profile Data", isPresented: $showingResetProfileAlert) {
+                Button("Cancel", role: .cancel) { }
+                Button("Reset", role: .destructive) {
+                    UserProfileManager.shared.resetProfile()
+                }
+            } message: {
+                Text("This deletes the personal info, goals, and music preferences stored by Pancake on this iPhone.")
+            }
         }
     }
 
@@ -112,6 +162,11 @@ struct UserProfileView: View {
 
         return "\(artistCount) artists, \(songCount) songs"
     }
+}
+
+private enum AppExternalLinks {
+    static let privacyPolicy = URL(string: "https://github.com/itsfloppyhat/Pancake/blob/main/docs/PRIVACY_POLICY.md")!
+    static let support = URL(string: "https://github.com/itsfloppyhat/Pancake/blob/main/docs/SUPPORT.md")!
 }
 
 // MARK: - Profile Header View
@@ -237,7 +292,7 @@ struct MusicAuthorizationView: View {
             AuthorizationStatusRow(
                 icon: "play.circle",
                 title: "Apple Music Playback",
-                subtitle: viewModel.isCatalogAuthorized ? "Ready to play generated songs outside your library" : "Not enabled",
+                subtitle: viewModel.isCatalogAuthorized ? "Ready for requested songs and Adaptive Mix playback" : "Not enabled",
                 isConnected: viewModel.isCatalogAuthorized,
                 actionTitle: "Continue"
             ) {
@@ -246,7 +301,7 @@ struct MusicAuthorizationView: View {
                 }
             }
 
-            Text("Library access helps Pancake learn your taste. Apple Music playback lets it play generated songs even when they are not already saved in your library.")
+            Text("Library access helps Pancake learn your taste. Apple Music playback lets it play requested songs and an Adaptive Mix during a run.")
                 .font(.caption)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.leading)
@@ -1321,7 +1376,7 @@ struct HealthKitImportSectionView: View {
                 }
             }
         } message: {
-            Text("This will import all running workouts from HealthKit that are longer than 0.5km. Duplicate runs will be automatically filtered out.")
+            Text("This will import all running workouts from Health that are longer than 0.5km. Duplicate runs will be automatically filtered out.")
         }
         .alert("Clear All Data", isPresented: $showingClearAlert) {
             Button("Cancel", role: .cancel) { }

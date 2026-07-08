@@ -60,6 +60,17 @@ enum Intensity: String, CaseIterable, Identifiable, Codable, Hashable {
         targetHeartRate(maxHeartRate: Self.defaultMaxHeartRate)
     }
 
+    var defaultHeartRateRange: ClosedRange<Int> {
+        heartRateRange(maxHeartRate: Self.defaultMaxHeartRate)
+    }
+
+    func heartRateRange(maxHeartRate: Int) -> ClosedRange<Int> {
+        let range = percentRange
+        let lower = Int((Double(maxHeartRate) * range.lower).rounded())
+        let upper = Int((Double(maxHeartRate) * range.upper).rounded())
+        return lower...upper
+    }
+
     func targetHeartRate(maxHeartRate: Int) -> Int {
         let range = percentRange
         return Int((Double(maxHeartRate) * ((range.lower + range.upper) / 2)).rounded())
@@ -239,6 +250,10 @@ enum WatchMessageType: String, CaseIterable {
     case playbackControl = "playbackControl"
     case currentSong = "currentSong"
     case musicSuggestion = "musicSuggestion"
+    case adaptiveMixState = "adaptiveMixState"
+
+    // Cheer Squad
+    case cheer = "cheer"
 
     // Health Data
     case workoutHeartRate = "workoutHeartRate"

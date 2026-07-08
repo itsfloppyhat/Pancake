@@ -93,7 +93,11 @@ final class WorkoutMusicCoordinator: ObservableObject {
     private static let maximumRecentSongs = 5
     private static let preferredPrefetchDepth = 2
     private static let liveHeartRateGracePeriod: TimeInterval = 90
+    /// After this long without a fresh sample, stop steering music with the last known heart rate.
+    private static let heartRateStalenessInterval: TimeInterval = 30
     private static let minimumQueueRefillRequestInterval: TimeInterval = 10
+    private static let simulatorLoggingArgument = "--pancake-simulated-run"
+    private static let simulatorLoggingEnvironmentKey = "PANCAKE_SIMULATED_RUN"
 
     var adaptiveMixQueuedSongCount: Int {
         min(musicManager.adaptiveUpcomingSongs.count, AdaptiveMixPolicy.queueDepth)
@@ -111,6 +115,16 @@ final class WorkoutMusicCoordinator: ObservableObject {
         return "Mix \(snapshot.revision) | \(adaptiveMixQueuedSongCount) verified | \(playedSongCount) played | \(snapshot.goalScore.targetIntensity.label) | \(snapshot.goalScore.alignmentScore)% match | \(snapshot.rejectedCatalogCandidateCount) replaced | \(snapshot.trigger.rawValue)"
     }
 
+    private static var isSimulatorLoggingEnabled: Bool {
+        #if DEBUG
+        let processInfo = ProcessInfo.processInfo
+        return processInfo.arguments.contains(simulatorLoggingArgument) ||
+            processInfo.environment[simulatorLoggingEnvironmentKey] == "1"
+        #else
+        return false
+        #endif
+    }
+
     // Fartlek detection
     private var isFartlekWorkout = false
     /// Minimum segment duration (in seconds) required to trigger a song change on segment transition.
@@ -126,16 +140,6 @@ final class WorkoutMusicCoordinator: ObservableObject {
     
     private func setupWatchConnectivity() {
         // Listen for music-related messages from WatchConnectivityManager
-        NotificationCenter.default.addObserver(
-            forName: .requestMusicSuggestion,
-            object: nil,
-            queue: .main
-        ) { [weak self] notification in
-            Task {
-                await self?.generateNextSongUserRequested()
-            }
-        }
-        
         NotificationCenter.default.addObserver(
             forName: .playbackControl,
             object: nil,
@@ -171,32 +175,6 @@ final class WorkoutMusicCoordinator: ObservableObject {
             }
         }
         
-        NotificationCenter.default.addObserver(
-            forName: .workoutHeartRate,
-            object: nil,
-            queue: .main
-        ) { [weak self] notification in
-            if let message = notification.object as? [String: Any],
-               let heartRate = message["heartRate"] as? Int {
-                Task { @MainActor in
-                    self?.handleHeartRateUpdate(heartRate)
-                }
-            }
-        }
-        
-        NotificationCenter.default.addObserver(
-            forName: .segmentChanged,
-            object: nil,
-            queue: .main
-        ) { [weak self] notification in
-            if let message = notification.object as? [String: Any],
-               let segmentIndex = message["currentSegmentIndex"] as? Int {
-                Task { @MainActor in
-                    self?.handleSegmentChange(segmentIndex: segmentIndex)
-                }
-            }
-        }
-
         NotificationCenter.default.addObserver(
             forName: .workoutUpdate,
             object: nil,
@@ -302,6 +280,9 @@ final class WorkoutMusicCoordinator: ObservableObject {
 
         // Prepare optional music context. Playback starts only after a user action.
         musicManager.startWorkoutMusic()
+
+        // Let the Cheer Squad know (no-op unless sharing is set up).
+        CheerSquadManager.shared.workoutDidStart()
     }
     
     func stopWorkoutMusic() {
@@ -335,41 +316,10 @@ final class WorkoutMusicCoordinator: ObservableObject {
         // Stop music playback
         musicManager.stopWorkoutMusic()
 
-        // Send workout stop to watch
-        sendWorkoutStopToWatch()
+        // End the run broadcast and clean up the public announcement.
+        CheerSquadManager.shared.workoutDidEnd()
     }
     
-    func updateWorkoutContext(
-        currentSegmentIndex: Int,
-        totalDistance: Double,
-        totalTime: TimeInterval,
-        heartRate: Int?,
-        targetHeartRate: Int?
-    ) {
-        guard let context = currentWorkoutContext else { return }
-        
-        let updatedContext = makeWorkoutContext(
-            segments: context.segments,
-            currentSegmentIndex: currentSegmentIndex,
-            totalDistance: totalDistance,
-            totalTime: totalTime,
-            heartRate: heartRate,
-            targetHeartRate: targetHeartRate
-        )
-        
-        currentWorkoutContext = updatedContext
-        
-        // Check for distance milestones (only for single segment workouts)
-        checkForDistanceMilestone(previousDistance: context.totalDistance, newDistance: totalDistance)
-        
-        // Send updated context to watch
-        sendWorkoutContextToWatch(updatedContext)
-    }
-    
-    private func checkForDistanceMilestone(previousDistance: Double, newDistance: Double) {
-        // Km milestones are now handled on the Watch side with haptic feedback
-    }
-
     // MARK: - Adaptive Mix
 
     func startAdaptiveMixUserRequested() async {
@@ -458,18 +408,33 @@ final class WorkoutMusicCoordinator: ObservableObject {
         )
         let resolvedItems = resolutionReport.items
 
+        guard isWorkoutActive,
+              isAdaptiveMixActive,
+              currentWorkoutContext != nil else {
+            isAdaptiveMixCurating = false
+            stopAdaptiveMixRefreshTimer()
+            sendAdaptiveMixStateToWatch()
+            return
+        }
+
         var didApplyQueue: Bool
-        if !resolutionReport.hasVerifiedSongCount(requiredSongCount) {
-            didApplyQueue = false
-        } else if shouldStartPlayback {
-            didApplyQueue = await musicManager.startAdaptiveMix(with: resolvedItems)
-        } else {
+        if shouldStartPlayback {
+            // Starting playback tolerates a partial queue; the refill logic
+            // tops it back up to full depth as soon as more songs verify.
+            if resolvedItems.count >= AdaptiveMixPolicy.minimumStartSongCount {
+                didApplyQueue = await musicManager.startAdaptiveMix(with: resolvedItems)
+            } else {
+                didApplyQueue = false
+            }
+        } else if resolutionReport.hasVerifiedSongCount(requiredSongCount) {
             let replacementItems = Array(resolvedItems.prefix(AdaptiveMixPolicy.queueDepth))
             didApplyQueue = musicManager.replaceAdaptiveMixUpcoming(with: replacementItems)
 
             if !didApplyQueue, !musicManager.hasActiveAdaptiveQueueEntry {
                 didApplyQueue = await musicManager.startAdaptiveMix(with: replacementItems)
             }
+        } else {
+            didApplyQueue = false
         }
 
         if didApplyQueue {
@@ -488,6 +453,7 @@ final class WorkoutMusicCoordinator: ObservableObject {
                 targetIntensity: goalScore.targetIntensity,
                 rejectedCatalogCandidateCount: resolutionReport.rejectedSuggestionCount
             )
+            logSimulatorQueueSnapshotIfNeeded(trigger: trigger)
             restartAdaptiveMixRefreshTimer()
         } else if musicManager.isAdaptivePlaybackActive {
             adaptiveMixStatus = "Keeping current mix: \(resolvedItems.count)/\(requiredSongCount) Apple Music songs verified"
@@ -588,12 +554,33 @@ final class WorkoutMusicCoordinator: ObservableObject {
         }
     }
 
+    /// Fartlek plans keep the current song through short segments, so skip
+    /// pre-curating a queue for an upcoming segment the mix will not react to.
+    private func shouldPrecurateSegment(at segmentIndex: Int) -> Bool {
+        guard isFartlekWorkout,
+              let context = currentWorkoutContext,
+              !context.segments.isEmpty else {
+            return true
+        }
+
+        let segment = context.segments[min(segmentIndex, context.segments.count - 1)]
+        return segmentDurationSeconds(segment) >= Self.minimumSegmentDurationForSongChange
+    }
+
+    private var hasFreshHeartRateSample: Bool {
+        guard let lastHeartRateSampleAt else { return false }
+        return Date().timeIntervalSince(lastHeartRateSampleAt) <= Self.heartRateStalenessInterval
+    }
+
     private func makeAdaptiveMixContext(
         from workoutContext: WorkoutContext,
         targetSegmentIndex: Int
     ) -> MusicContext {
         let boundedTargetIndex = min(max(0, targetSegmentIndex), workoutContext.segments.count - 1)
         let targetSegment = workoutContext.segments[boundedTargetIndex]
+        // Fartlek plans swap zones too quickly for per-segment curation, so use
+        // the lookahead intensity to keep the queue's energy appropriate.
+        let targetIntensity = effectiveIntensity(at: boundedTargetIndex, segments: workoutContext.segments)
         let currentContext = workoutContext.musicContext
         let timeRemaining = if boundedTargetIndex == workoutContext.currentSegmentIndex {
             workoutContext.timeRemainingInSegment
@@ -604,10 +591,10 @@ final class WorkoutMusicCoordinator: ObservableObject {
         return MusicContext(
             currentHeartRate: currentContext.currentHeartRate,
             guidanceHeartRate: currentContext.guidanceHeartRate,
-            targetHeartRate: targetSegment.intensity.defaultTargetHeartRate,
+            targetHeartRate: targetIntensity.defaultTargetHeartRate,
             heartRateTrend: currentContext.heartRateTrend,
             hasStableHeartRateSignal: currentContext.hasStableHeartRateSignal,
-            currentIntensity: targetSegment.intensity,
+            currentIntensity: targetIntensity,
             timeRemainingInSegment: timeRemaining,
             currentSongEndingIn: currentContext.currentSongEndingIn,
             userPreferences: currentContext.userPreferences,
@@ -1048,66 +1035,7 @@ final class WorkoutMusicCoordinator: ObservableObject {
     }
 
     // MARK: - Watch Communication
-    
-    private func sendWorkoutStartToWatch(segments: [RunSegment]) {
-        // Use fallback method for workout start - critical message
-        guard watchConnectivity.isWatchPaired && watchConnectivity.isWatchAppInstalled else { 
-            return 
-        }
-        
-        let message: [String: Any] = [
-            "type": WatchMessageType.workoutStart.rawValue,
-            "segments": segments.map { segment in
-                [
-                    "intensity": segment.intensity.rawValue,
-                    "target": [
-                        "type": segment.target.isTime ? "time" : "distance",
-                        "value": segment.target.isTime ? segment.target.timeSeconds : segment.target.distanceMeters
-                    ]
-                ]
-            }
-        ]
-        
-        watchConnectivity.sendMessageWithFallback(message) { error in
-            print("Failed to send workout start to watch: \(error)")
-        }
-    }
-    
-    private func sendWorkoutStopToWatch() {
-        guard watchConnectivity.isWatchPaired && watchConnectivity.isWatchAppInstalled else { return }
-        
-        let message: [String: Any] = [
-            "type": WatchMessageType.workoutStop.rawValue
-        ]
-        
-        watchConnectivity.sendMessageWithFallback(message) { error in
-            print("Failed to send workout stop to watch: \(error)")
-        }
-    }
-    
-    private func sendWorkoutContextToWatch(_ context: WorkoutContext) {
-        guard watchConnectivity.isWatchPaired && watchConnectivity.isWatchAppInstalled else { return }
 
-        var message: [String: Any] = [
-            "type": WatchMessageType.workoutUpdate.rawValue,
-            "currentSegmentIndex": context.currentSegmentIndex,
-            "totalDistance": context.totalDistance,
-            "totalTime": context.totalTime
-        ]
-
-        if let heartRate = context.musicContext.currentHeartRate {
-            message["heartRate"] = heartRate
-        }
-
-        if let targetHeartRate = context.musicContext.targetHeartRate {
-            message["targetHeartRate"] = targetHeartRate
-        }
-        
-        watchConnectivity.sendMessageWithFallback(message) { error in
-            print("Failed to send workout context to watch: \(error)")
-        }
-    }
-    
     private func sendCurrentSongToWatch(_ song: MusicSong?) {
         guard watchConnectivity.isWatchPaired && watchConnectivity.isWatchAppInstalled else { return }
 
@@ -1168,6 +1096,12 @@ final class WorkoutMusicCoordinator: ObservableObject {
             message["targetZone"] = snapshot.goalScore.targetIntensity.label
             message["alignmentScore"] = snapshot.goalScore.alignmentScore
             message["replacedSongCount"] = snapshot.rejectedCatalogCandidateCount
+            message["guidanceText"] = friendlyGuidanceText(for: snapshot.goalScore)
+        }
+
+        if let nextSong = musicManager.adaptiveUpcomingSongs.first {
+            message["nextSongTitle"] = nextSong.title
+            message["nextSongArtist"] = nextSong.artist
         }
 
         if let nextAdaptiveMixRefreshAt {
@@ -1179,27 +1113,21 @@ final class WorkoutMusicCoordinator: ObservableObject {
         }
     }
     
-    private func sendMusicSuggestionToWatch(_ suggestion: MusicSuggestion) {
-        guard watchConnectivity.isWatchPaired && watchConnectivity.isWatchAppInstalled else { return }
-        
-        let message: [String: Any] = [
-            "type": WatchMessageType.musicSuggestion.rawValue,
-            "suggestion": [
-                "songTitle": suggestion.songTitle,
-                "artist": suggestion.artist,
-                "reason": suggestion.reason,
-                "mood": suggestion.mood.rawValue,
-                "confidence": suggestion.confidence
-            ]
-        ]
-        
-        watchConnectivity.sendMessageWithFallback(message) { error in
-            print("Failed to send music suggestion to watch: \(error)")
+    private func friendlyGuidanceText(for goalScore: AdaptiveMixGoalScore) -> String {
+        switch goalScore.guidance {
+        case .easeDown:
+            return "Easing you down to \(goalScore.targetIntensity.label)"
+        case .lift:
+            return "Lifting you toward \(goalScore.targetIntensity.label)"
+        case .maintain:
+            return "Holding \(goalScore.targetIntensity.label)"
+        case .followPlan:
+            return "Following your plan: \(goalScore.targetIntensity.label)"
         }
     }
-    
+
     // MARK: - Helper Methods
-    
+
     private func handlePlaybackControl(_ action: String) {
         switch action {
         case "play":
@@ -1321,19 +1249,6 @@ final class WorkoutMusicCoordinator: ObservableObject {
         return segments.isEmpty ? nil : segments
     }
     
-    private func handleHeartRateUpdate(_ heartRate: Int) {
-        guard let context = currentWorkoutContext else { return }
-        rememberHeartRate(heartRate)
-        
-        updateWorkoutContext(
-            currentSegmentIndex: context.currentSegmentIndex,
-            totalDistance: context.totalDistance,
-            totalTime: context.totalTime,
-            heartRate: heartRate,
-            targetHeartRate: context.musicContext.targetHeartRate
-        )
-    }
-    
     private func handleWorkoutUpdate(_ message: [String: Any]) {
         guard isWorkoutActive, let context = currentWorkoutContext else { return }
 
@@ -1342,7 +1257,8 @@ final class WorkoutMusicCoordinator: ObservableObject {
         let totalTime = message["totalTime"] as? Double ?? context.totalTime
         let heartRateUnavailable = message["heartRateUnavailable"] as? Bool ?? false
         let receivedHeartRate = message["heartRate"] as? Int
-        let heartRate = heartRateUnavailable ? nil : (receivedHeartRate ?? context.musicContext.currentHeartRate)
+        let fallbackHeartRate = hasFreshHeartRateSample ? context.musicContext.currentHeartRate : nil
+        let heartRate = heartRateUnavailable ? nil : (receivedHeartRate ?? fallbackHeartRate)
         let targetHeartRate = message["targetHeartRate"] as? Int ?? context.musicContext.targetHeartRate
 
         if heartRateUnavailable,
@@ -1369,7 +1285,8 @@ final class WorkoutMusicCoordinator: ObservableObject {
         currentWorkoutContext = updatedContext
 
         if let adaptiveMixCurationTargetSegmentIndex = message["adaptiveMixCurationTargetSegmentIndex"] as? Int,
-           isAdaptiveMixActive {
+           isAdaptiveMixActive,
+           shouldPrecurateSegment(at: adaptiveMixCurationTargetSegmentIndex) {
             restartAdaptiveMixRefreshTimer()
             Task {
                 await requestAdaptiveMixCuration(
@@ -1463,6 +1380,12 @@ final class WorkoutMusicCoordinator: ObservableObject {
 
     private func checkLiveMetricsSignal() {
         guard isWorkoutActive, let workoutStartTime else { return }
+
+        // Signal dropped mid-run: stop steering music with stale samples.
+        if lastHeartRateSampleAt != nil, !hasFreshHeartRateSample, !recentHeartRateSamples.isEmpty {
+            recentHeartRateSamples.removeAll()
+        }
+
         guard !isLiveMetricsWarningDismissed else { return }
         guard Date().timeIntervalSince(workoutStartTime) >= Self.liveHeartRateGracePeriod else { return }
         guard lastHeartRateSampleAt == nil else { return }
@@ -1537,6 +1460,7 @@ final class WorkoutMusicCoordinator: ObservableObject {
 
             if isNewlyPlayedSong {
                 print("Workout recorded played song: \(song.title) by \(song.artist)")
+                logSimulatorPlayedSongIfNeeded(song)
                 sendAdaptiveMixStateToWatch()
             }
 
@@ -1656,5 +1580,27 @@ final class WorkoutMusicCoordinator: ObservableObject {
 
         RunHistoryStore.shared.add(event: event)
         print("✅ saveRunEvent: Run event saved successfully")
+        #if DEBUG
+        if Self.isSimulatorLoggingEnabled {
+            PancakeSimulatorLog("PANCAKE_SIM:SAVE_RUN_EVENT distanceMeters=\(totalDistanceMeters) totalSeconds=\(totalTimeSeconds)")
+        }
+        #endif
+    }
+
+    private func logSimulatorQueueSnapshotIfNeeded(trigger: AdaptiveMixCurationTrigger) {
+        guard Self.isSimulatorLoggingEnabled else { return }
+
+        let queuedKeys = musicManager.adaptiveUpcomingSongs
+            .prefix(AdaptiveMixPolicy.queueDepth)
+            .map(\.sessionSongKey)
+            .joined(separator: ",")
+
+        PancakeSimulatorLog("PANCAKE_SIM:QUEUE revision=\(adaptiveMixRevision) trigger=\(trigger.rawValue) songs=\(queuedKeys) played=\(playedSongCount)")
+    }
+
+    private func logSimulatorPlayedSongIfNeeded(_ song: MusicSong) {
+        guard Self.isSimulatorLoggingEnabled else { return }
+
+        PancakeSimulatorLog("PANCAKE_SIM:PLAYED key=\(song.sessionSongKey) title=\(song.title) artist=\(song.artist)")
     }
 }

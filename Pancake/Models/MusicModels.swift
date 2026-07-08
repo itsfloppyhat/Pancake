@@ -92,9 +92,6 @@ struct MusicPreferences: Codable, Equatable {
     var importedPlaylistSongs: [MusicSong]
     var importedPlaylistGenres: [MusicGenre]
     var preferredMoodForIntensity: [Intensity: MusicMood]
-    var autoPlayEnabled: Bool
-    var crossfadeDuration: TimeInterval
-    var volumeBoost: Double
     
     init(
         favoriteArtists: [MusicArtist] = [],
@@ -104,10 +101,7 @@ struct MusicPreferences: Codable, Equatable {
         importedPlaylistArtists: [MusicArtist] = [],
         importedPlaylistSongs: [MusicSong] = [],
         importedPlaylistGenres: [MusicGenre] = [],
-        preferredMoodForIntensity: [Intensity: MusicMood] = [:],
-        autoPlayEnabled: Bool = true,
-        crossfadeDuration: TimeInterval = 4.0,
-        volumeBoost: Double = 0.0
+        preferredMoodForIntensity: [Intensity: MusicMood] = [:]
     ) {
         self.favoriteArtists = favoriteArtists
         self.favoriteSongs = favoriteSongs
@@ -117,9 +111,6 @@ struct MusicPreferences: Codable, Equatable {
         self.importedPlaylistSongs = importedPlaylistSongs
         self.importedPlaylistGenres = importedPlaylistGenres
         self.preferredMoodForIntensity = preferredMoodForIntensity
-        self.autoPlayEnabled = autoPlayEnabled
-        self.crossfadeDuration = crossfadeDuration
-        self.volumeBoost = volumeBoost
         
         // Set default mood preferences for each intensity
         if self.preferredMoodForIntensity.isEmpty {
@@ -205,13 +196,15 @@ struct MusicContext: Codable {
         guard let current = effectiveHeartRate, let target = targetHeartRate else {
             return .unknown
         }
-        
+
+        // The ±8 BPM band matches AdaptiveMixPolicy.goalScore so prompts and
+        // goal guidance never disagree about whether the runner is in zone.
         let difference = abs(current - target)
         if difference <= 5 {
             return .perfect
-        } else if current < target - 10 {
+        } else if current < target - 8 {
             return .tooLow
-        } else if current > target + 10 {
+        } else if current > target + 8 {
             return .tooHigh
         } else {
             return .close
@@ -325,7 +318,7 @@ enum PromptLabSourceMode: String, CaseIterable, Identifiable, Hashable {
     var displayName: String {
         switch self {
         case .allowCatalog:
-            return "Allow Apple Music"
+            return "Use Apple Music"
         case .preferLibrary:
             return "Prefer Library"
         case .libraryOnly:
@@ -340,7 +333,7 @@ enum PromptLabSourceMode: String, CaseIterable, Identifiable, Hashable {
         case .preferLibrary:
             return "Lean on saved songs first"
         case .libraryOnly:
-            return "Force a locally playable pick"
+            return "Use only songs saved in your library"
         }
     }
 

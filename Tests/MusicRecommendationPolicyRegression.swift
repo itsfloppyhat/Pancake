@@ -168,6 +168,8 @@ struct MusicRecommendationPolicyRegression {
     private static func testUpcomingIntervalPrecurationWindow() throws {
         try assertEqual(AdaptiveMixPolicy.refreshInterval, 30, "Adaptive Mix should regenerate playlists every 30 seconds.")
         try assertEqual(AdaptiveMixPolicy.upcomingIntervalLeadTime, 10, "Adaptive Mix should pre-curate 10 seconds before a new segment.")
+        try assertEqual(AdaptiveMixPolicy.queueDepth, 3, "Adaptive Mix should keep three verified upcoming songs.")
+        try assertEqual(AdaptiveMixPolicy.minimumStartSongCount, 2, "Adaptive Mix should be able to start with a partial queue of two verified songs.")
 
         try assertTrue(
             AdaptiveMixPolicy.shouldPrecurateUpcomingInterval(

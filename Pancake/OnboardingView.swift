@@ -2,7 +2,6 @@ import SwiftUI
 
 struct OnboardingView: View {
     @StateObject private var onboarding = OnboardingManager.shared
-    @StateObject private var authManager = AuthManager.shared
     @StateObject private var profileManager = UserProfileManager.shared
     @State private var showingMusicPreferences = false
     @State private var showingSongCheck = false
@@ -78,43 +77,15 @@ struct OnboardingView: View {
                 .buttonStyle(BubblySmallButtonStyle(backgroundColor: .pastelLavender))
             }
 
-        case .account:
-            VStack(alignment: .leading, spacing: 12) {
-                if authManager.isAuthenticated {
-                    OnboardingStatusLine(icon: "checkmark.circle.fill", text: "Signed in as \(authManager.displayName)", color: .pastelMint)
-                } else {
-                    Text("Sign in keeps your account ready for future sync features. You can continue without an account.")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-
-                    SignInWithAppleButtonView(authManager: authManager)
-                        .frame(height: 50)
-                }
-
-                Button(authManager.isAuthenticated ? "Continue" : "Continue without account") {
-                    onboarding.moveNext()
-                }
-                .buttonStyle(BubblySmallButtonStyle(backgroundColor: .pastelPeriwinkle))
-            }
-
         case .runAccess:
             VStack(spacing: 12) {
                 OnboardingPermissionRow(
-                    title: "Health",
-                    subtitle: "Heart rate and workout data guide the music intensity.",
+                    title: "Health history import",
+                    subtitle: "Optional. Read completed runs from Health into your iPhone history.",
                     icon: "heart.fill",
                     isComplete: onboarding.healthReady
                 ) {
                     onboarding.requestHealthAuthorization()
-                }
-
-                OnboardingPermissionRow(
-                    title: "Location",
-                    subtitle: "Distance and pace keep segment progress accurate.",
-                    icon: "location.fill",
-                    isComplete: onboarding.locationReady
-                ) {
-                    onboarding.requestLocationAuthorization()
                 }
 
                 Button("Continue") {
@@ -127,7 +98,7 @@ struct OnboardingView: View {
             VStack(spacing: 12) {
                 OnboardingPermissionRow(
                     title: "Apple Music playback",
-                    subtitle: "Allows Pancake to play generated songs during a run.",
+                    subtitle: "Optional. Play requested suggestions or start an Adaptive Mix during a run.",
                     icon: "play.circle.fill",
                     isComplete: onboarding.catalogReady
                 ) {
@@ -138,7 +109,7 @@ struct OnboardingView: View {
 
                 OnboardingPermissionRow(
                     title: "Library taste import",
-                    subtitle: "Learns artists, songs, genres, and playlists you already like.",
+                    subtitle: "Optional. Learn artists, songs, genres, and playlists you already like.",
                     icon: "music.note.list",
                     isComplete: onboarding.libraryReady
                 ) {
@@ -168,7 +139,7 @@ struct OnboardingView: View {
 
         case .songCheck:
             VStack(alignment: .leading, spacing: 12) {
-                Text("Generate and play one song before your first run so Apple Music setup is tested while you are still on the phone.")
+                Text("If you plan to use Adaptive Mix, verify catalog playback before your first run.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
 
@@ -187,11 +158,11 @@ struct OnboardingView: View {
             VStack(alignment: .leading, spacing: 12) {
                 OnboardingStatusLine(
                     icon: onboarding.watchReady ? "checkmark.circle.fill" : "applewatch.slash",
-                    text: onboarding.watchReady ? "Apple Watch is ready" : "Install Pancake on Apple Watch before your first run.",
+                    text: onboarding.watchReady ? "Watch companion is ready" : "Install Pancake on your watch before your first run.",
                     color: onboarding.watchReady ? .pastelMint : .pastelPeach
                 )
 
-                Text("Start the workout from the Watch. The iPhone generates songs and keeps playback running with the screen off.")
+                Text("Start the workout from the watch companion. Music stays off until you request a suggestion or tap Start Adaptive Mix.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
 
@@ -206,8 +177,7 @@ struct OnboardingView: View {
     private func isComplete(_ step: OnboardingStep) -> Bool {
         switch step {
         case .welcome: return true
-        case .account: return authManager.isAuthenticated
-        case .runAccess: return onboarding.runAccessReady
+        case .runAccess: return onboarding.healthReady
         case .music: return onboarding.musicPlaybackReady && onboarding.musicTasteReady
         case .songCheck: return onboarding.musicPlaybackReady
         case .watch: return onboarding.watchReady
@@ -218,14 +188,12 @@ struct OnboardingView: View {
         switch step {
         case .welcome:
             return "Start here"
-        case .account:
-            return authManager.isAuthenticated ? "Signed in" : "Optional"
         case .runAccess:
-            return onboarding.runAccessReady ? "Ready" : "Required"
+            return onboarding.healthReady ? "Import ready" : "Optional"
         case .music:
             if onboarding.musicPlaybackReady && onboarding.musicTasteReady { return "Ready" }
             if onboarding.musicPlaybackReady { return "Taste recommended" }
-            return "Required"
+            return "Optional"
         case .songCheck:
             return onboarding.musicPlaybackReady ? "Available" : "After music setup"
         case .watch:

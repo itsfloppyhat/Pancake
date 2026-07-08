@@ -16,7 +16,7 @@ struct AISettingsView: View {
                 } header: {
                     Text("AI Status")
                 } footer: {
-                    Text("AI music features use on-device Apple Intelligence - no internet required and no additional costs.")
+                    Text("Suggestion generation uses on-device system models. Apple Music catalog playback may require a connection.")
                 }
 
                 // Music Selection Settings Section
@@ -115,8 +115,8 @@ struct AISettingsView: View {
 
                         FeatureRowView(
                             icon: "wifi.slash",
-                            title: "Works Offline",
-                            description: "No internet connection needed - AI runs entirely on your device"
+                            title: "On-Device Suggestions",
+                            description: "Suggestion generation runs on your device; catalog playback may require a connection"
                         )
                     }
                 } header: {
@@ -137,8 +137,8 @@ struct AISettingsView: View {
 
                         RequirementRowView(
                             icon: "gearshape",
-                            title: "Apple Intelligence",
-                            description: "Must be enabled in Settings > Apple Intelligence & Siri"
+                            title: "On-device AI",
+                            description: "Must be enabled in Settings before AI music suggestions are available"
                         )
 
                         RequirementRowView(
@@ -224,9 +224,9 @@ struct AIStatusView: View {
     private var statusTitle: String {
         switch status {
         case .available:
-            return "Apple Intelligence Available"
+            return "On-device AI available"
         case .unavailable:
-            return "Apple Intelligence Unavailable"
+            return "On-device AI unavailable"
         }
     }
 }

@@ -13,7 +13,11 @@ struct ContentView: View {
     var body: some View {
         NavigationStack {
             Group {
-                if watchConnectivity.hasReceivedRunPlan {
+                if !healthKit.isAuthorized {
+                    WatchHealthSetupView {
+                        healthKit.requestAuthorization()
+                    }
+                } else if watchConnectivity.hasReceivedRunPlan {
                     ReceivedPlanView(
                         segments: watchConnectivity.receivedRunPlan,
                         isStarting: workoutManager.isStarting,
@@ -21,13 +25,12 @@ struct ContentView: View {
                         onDismissPlan: dismissPlan
                     )
                 } else {
-                    WaitingForPlanView(isReachable: watchConnectivity.isReachable)
+                    WaitingForPlanView(
+                        isReachable: watchConnectivity.isReachable,
+                        isStarting: workoutManager.isStarting,
+                        onQuickRun: startQuickRun
+                    )
                 }
-            }
-        }
-        .onAppear {
-            if !healthKit.isAuthorized {
-                healthKit.requestAuthorization()
             }
         }
         .overlay {
@@ -81,6 +84,11 @@ struct ContentView: View {
         } message: {
             Text(startErrorMessage ?? "Please try again.")
         }
+        #if DEBUG
+        .task {
+            await DebugWatchSimulatorRunController.startIfRequested()
+        }
+        #endif
     }
 
     private func startWorkout() {
@@ -92,40 +100,185 @@ struct ContentView: View {
         workoutManager.startOutdoorRun(segments: segments)
     }
 
+    /// Starts an easy run without an iPhone plan. Matches the default context
+    /// the iPhone assumes when a workout starts without a received plan.
+    private func startQuickRun() {
+        guard !workoutManager.isStarting else { return }
+        isStartAttemptActive = true
+        hasSentWorkoutStarted = false
+        startErrorMessage = nil
+        workoutManager.startOutdoorRun(segments: [
+            RunSegment(intensity: .zone2, target: .time(seconds: 1800))
+        ])
+    }
+
     private func dismissPlan() {
         guard !workoutManager.isStarting else { return }
         watchConnectivity.clearReceivedRunPlan()
     }
 }
 
+#if DEBUG
+func PancakeSimulatorLog(_ message: String) {
+    print(message)
+
+    guard let logURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?.appendingPathComponent("pancake-sim.log") else {
+        return
+    }
+
+    let line = "\(ISO8601DateFormatter().string(from: Date())) \(message)\n"
+    let data = Data(line.utf8)
+
+    if FileManager.default.fileExists(atPath: logURL.path),
+       let handle = try? FileHandle(forWritingTo: logURL) {
+        handle.seekToEndOfFile()
+        handle.write(data)
+        try? handle.close()
+    } else {
+        try? data.write(to: logURL, options: .atomic)
+    }
+}
+
+@MainActor
+private enum DebugWatchSimulatorRunController {
+    private static let runArgument = "--pancake-simulated-run"
+    private static let runEnvironmentKey = "PANCAKE_SIMULATED_RUN"
+    private static var didStart = false
+
+    static func startIfRequested() async {
+        let processInfo = ProcessInfo.processInfo
+        guard processInfo.arguments.contains(runArgument) ||
+                processInfo.environment[runEnvironmentKey] == "1" else {
+            return
+        }
+
+        guard !didStart else { return }
+        didStart = true
+
+        HealthKitManager.shared.isAuthorized = true
+        PancakeSimulatorLog("PANCAKE_SIM: Watch waiting for iPhone run plan")
+
+        guard await waitForRunPlan() else {
+            PancakeSimulatorLog("PANCAKE_SIM: Watch timed out waiting for run plan")
+            return
+        }
+
+        let segments = WatchConnectivityManager.shared.receivedRunPlan
+        PancakeSimulatorLog("PANCAKE_SIM: Watch received run plan segments=\(segments.count)")
+        WorkoutSessionManager.shared.startOutdoorRun(segments: segments)
+
+        guard await waitForWorkoutToRun() else {
+            PancakeSimulatorLog("PANCAKE_SIM: Watch timed out waiting for simulated workout start")
+            return
+        }
+
+        try? await Task.sleep(nanoseconds: 2_000_000_000)
+        WatchConnectivityManager.shared.sendMusicControl("adaptiveMix")
+        PancakeSimulatorLog("PANCAKE_SIM: Watch requested Adaptive Mix")
+
+        try? await Task.sleep(nanoseconds: 14_000_000_000)
+        WatchConnectivityManager.shared.sendMusicControl("next")
+        PancakeSimulatorLog("PANCAKE_SIM: Watch requested next song")
+
+        try? await Task.sleep(nanoseconds: 16_000_000_000)
+        WatchConnectivityManager.shared.sendMusicControl("next")
+        PancakeSimulatorLog("PANCAKE_SIM: Watch requested next song")
+    }
+
+    private static func waitForRunPlan() async -> Bool {
+        for _ in 0..<120 {
+            if WatchConnectivityManager.shared.hasReceivedRunPlan {
+                return true
+            }
+            try? await Task.sleep(nanoseconds: 500_000_000)
+        }
+        return false
+    }
+
+    private static func waitForWorkoutToRun() async -> Bool {
+        for _ in 0..<40 {
+            if WorkoutSessionManager.shared.isRunning {
+                return true
+            }
+            try? await Task.sleep(nanoseconds: 500_000_000)
+        }
+        return false
+    }
+}
+#else
+func PancakeSimulatorLog(_ message: String) {}
+#endif
+
+// MARK: - Health Setup View
+struct WatchHealthSetupView: View {
+    let onContinue: () -> Void
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "heart.text.square.fill")
+                .font(.system(size: 34))
+                .foregroundStyle(.green)
+
+            Text("Health Access")
+                .font(.headline)
+
+            Text("Health access saves workouts and shows live run metrics.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+
+            Button("Continue", action: onContinue)
+                .buttonStyle(.borderedProminent)
+                .tint(.green)
+        }
+        .padding(.horizontal, 8)
+        .navigationTitle("Pancake")
+    }
+}
+
 // MARK: - Waiting For Plan View
 struct WaitingForPlanView: View {
     let isReachable: Bool
+    let isStarting: Bool
+    let onQuickRun: () -> Void
 
     var body: some View {
-        VStack(spacing: 16) {
-            Spacer()
+        ScrollView {
+            VStack(spacing: 12) {
+                Image(systemName: "iphone.and.arrow.right.inward")
+                    .font(.system(size: 32))
+                    .foregroundStyle(.blue)
 
-            Image(systemName: "iphone.and.arrow.right.inward")
-                .font(.system(size: 40))
-                .foregroundStyle(.blue)
+                Text("Open Pancake on iPhone to plan your run")
+                    .font(.footnote)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal)
 
-            Text("Open Pancake on iPhone to plan your run")
-                .font(.headline)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal)
+                // Connectivity status
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(isReachable ? Color.green : Color.orange)
+                        .frame(width: 8, height: 8)
+                    Text(isReachable ? "iPhone Connected" : "iPhone Not Connected")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
 
-            // Connectivity status
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(isReachable ? Color.green : Color.orange)
-                    .frame(width: 8, height: 8)
-                Text(isReachable ? "iPhone Connected" : "iPhone Not Connected")
-                    .font(.caption)
+                Button {
+                    onQuickRun()
+                } label: {
+                    Label("Quick Run", systemImage: "figure.run")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.green)
+                .disabled(isStarting)
+
+                Text("30 min easy run, no plan needed")
+                    .font(.caption2)
                     .foregroundStyle(.secondary)
             }
-
-            Spacer()
         }
         .navigationTitle("Pancake")
     }
@@ -223,7 +376,7 @@ struct StartingWorkoutView: View {
                 .font(.headline)
                 .multilineTextAlignment(.center)
 
-            Text("Preparing Health, GPS, and music handoff.")
+            Text("Preparing Health and GPS tracking.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)

@@ -318,6 +318,10 @@ enum WatchMessageType: String, CaseIterable {
     case playbackControl = "playbackControl"
     case currentSong = "currentSong"
     case musicSuggestion = "musicSuggestion"
+    case adaptiveMixState = "adaptiveMixState"
+
+    // Cheer Squad
+    case cheer = "cheer"
 
     // Health Data
     case workoutHeartRate = "workoutHeartRate"

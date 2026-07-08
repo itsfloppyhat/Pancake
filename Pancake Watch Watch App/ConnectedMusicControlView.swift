@@ -13,8 +13,8 @@ struct ConnectedMusicControlView: View {
             if let currentSong = watchConnectivity.currentSong {
                 VStack(spacing: 2) {
                     Text(currentSong.title)
-                        .font(.caption2)
-                        .fontWeight(.medium)
+                        .font(.footnote)
+                        .fontWeight(.semibold)
                         .lineLimit(1)
 
                     Text(currentSong.artist)
@@ -28,17 +28,56 @@ struct ConnectedMusicControlView: View {
                     .foregroundColor(.secondary)
             }
 
+            // What the mix is doing for the runner right now
+            if watchConnectivity.isAdaptiveMixActive,
+               let guidance = watchConnectivity.adaptiveMixGuidanceText {
+                Text(guidance)
+                    .font(.caption2)
+                    .foregroundStyle(.green)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
+
+            if watchConnectivity.isAdaptiveMixActive,
+               let nextTitle = watchConnectivity.adaptiveMixNextSongTitle {
+                Text("Next: \(nextTitle)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                    .accessibilityLabel("Next song")
+                    .accessibilityValue(nextTitle)
+            }
+
+            Button(action: startAdaptiveMix) {
+                HStack(spacing: 4) {
+                    if watchConnectivity.isAdaptiveMixCurating {
+                        ProgressView()
+                            .frame(width: 12, height: 12)
+                    } else {
+                        Image(systemName: watchConnectivity.isAdaptiveMixActive ? "waveform.path.ecg" : "play.circle.fill")
+                    }
+
+                    Text(watchConnectivity.isAdaptiveMixActive ? "Adaptive Mix" : "Start Adaptive Mix")
+                        .font(.caption2)
+                        .fontWeight(.semibold)
+                }
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(watchConnectivity.isAdaptiveMixActive ? .green : .blue)
+            .disabled(watchConnectivity.isAdaptiveMixActive || watchConnectivity.isAdaptiveMixCurating)
+
             // Music Controls
             HStack(spacing: 10) {
-                // Play
+                // Play / Pause
                 Button(action: {
-                    sendMusicControl("play")
+                    sendMusicControl(watchConnectivity.isPlaying ? "pause" : "play")
                 }) {
-                    Image(systemName: "play.fill")
+                    Image(systemName: watchConnectivity.isPlaying ? "pause.fill" : "play.fill")
                         .font(.title3)
                 }
                 .buttonStyle(.plain)
-                .disabled(watchConnectivity.isPlaying)
+                .disabled(watchConnectivity.currentSong == nil)
 
                 // Stop
                 Button(action: {
@@ -51,27 +90,34 @@ struct ConnectedMusicControlView: View {
                 .buttonStyle(.plain)
                 .disabled(!watchConnectivity.isPlaying && watchConnectivity.currentSong == nil)
 
-                // AI Suggestion (Generate New Song)
+                // Advance the Adaptive Mix queue, or request a manual suggestion when it is off.
                 Button(action: {
-                    requestNewSong()
+                    requestNextSong()
                 }) {
                     if isRequestingSong {
                         ProgressView()
                             .frame(width: 20, height: 20)
                     } else {
-                        Image(systemName: "sparkles")
+                        Image(systemName: "forward.end.fill")
                             .font(.title3)
                             .foregroundColor(.blue)
                     }
                 }
                 .buttonStyle(.plain)
                 .disabled(isRequestingSong)
+                .accessibilityLabel(watchConnectivity.isAdaptiveMixActive ? "Next Adaptive Mix Song" : "Play New Suggestion")
             }
 
             // Playback State
             Text(playbackStatusText)
                 .font(.caption2)
                 .foregroundColor(playbackStatusColor)
+
+            Text(adaptiveMixDetailText)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
         }
         .padding(.horizontal, 4)
         .padding(.vertical, 2)
@@ -94,7 +140,7 @@ struct ConnectedMusicControlView: View {
         }
     }
 
-    private func requestNewSong() {
+    private func requestNextSong() {
         guard !isRequestingSong else { return }
 
         isRequestingSong = true
@@ -105,7 +151,7 @@ struct ConnectedMusicControlView: View {
         WKInterfaceDevice.current().play(.click)
         #endif
 
-        sendMusicControl("suggest")
+        sendMusicControl(watchConnectivity.isAdaptiveMixActive ? "next" : "suggest")
 
         // Safety timeout: if no song change within 15 seconds, clear the loading state
         DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [self] in
@@ -113,6 +159,19 @@ struct ConnectedMusicControlView: View {
                 clearPendingSuggestionRequest()
             }
         }
+    }
+
+    private func startAdaptiveMix() {
+        guard !watchConnectivity.isAdaptiveMixActive,
+              !watchConnectivity.isAdaptiveMixCurating else {
+            return
+        }
+
+        #if os(watchOS)
+        WKInterfaceDevice.current().play(.click)
+        #endif
+
+        sendMusicControl("adaptiveMix")
     }
 
     private func sendMusicControl(_ action: String) {
@@ -126,7 +185,7 @@ struct ConnectedMusicControlView: View {
                 print("Failed to send music control: \(error)")
                 DispatchQueue.main.async {
                     // Clear loading state on send failure
-                    if action == "suggest" {
+                    if action == "suggest" || action == "next" {
                         clearPendingSuggestionRequest()
                     }
                 }
@@ -138,7 +197,7 @@ struct ConnectedMusicControlView: View {
 
     private var playbackStatusText: String {
         if isRequestingSong {
-            return "Finding new song..."
+            return watchConnectivity.isAdaptiveMixActive ? "Advancing queue..." : "Finding new song..."
         }
 
         switch watchConnectivity.playbackState {
@@ -151,6 +210,21 @@ struct ConnectedMusicControlView: View {
         default:
             return watchConnectivity.playbackState
         }
+    }
+
+    private var adaptiveMixDetailText: String {
+        if watchConnectivity.isAdaptiveMixCurating {
+            return "Curating songs..."
+        }
+
+        guard watchConnectivity.isAdaptiveMixActive else {
+            return watchConnectivity.adaptiveMixStatus
+        }
+
+        let queueCount = watchConnectivity.adaptiveMixQueuedSongCount
+        let playedCount = watchConnectivity.adaptiveMixPlayedSongCount
+        let zone = watchConnectivity.adaptiveMixTargetZone ?? "Zone --"
+        return "\(zone) · \(queueCount) queued · \(playedCount) played"
     }
 
     private var playbackStatusColor: Color {

@@ -210,18 +210,12 @@ extension WatchConnectivityWrapper: WCSessionDelegate {
             NotificationCenter.default.post(name: .workoutControl, object: message)
         case WatchMessageType.workoutStart.rawValue:
             NotificationCenter.default.post(name: .workoutControl, object: message)
-        case WatchMessageType.requestMusicSuggestion.rawValue:
-            NotificationCenter.default.post(name: .requestMusicSuggestion, object: message)
         case WatchMessageType.playbackControl.rawValue:
             NotificationCenter.default.post(name: .playbackControl, object: message)
         case "musicControl":
             NotificationCenter.default.post(name: .playbackControl, object: message)
         case "workoutControl":
             NotificationCenter.default.post(name: .workoutControl, object: message)
-        case WatchMessageType.workoutHeartRate.rawValue:
-            NotificationCenter.default.post(name: .workoutHeartRate, object: message)
-        case "segment_changed":
-            NotificationCenter.default.post(name: .segmentChanged, object: message)
         case WatchMessageType.workoutUpdate.rawValue, "workout_update":
             NotificationCenter.default.post(name: .workoutUpdate, object: message)
         default:

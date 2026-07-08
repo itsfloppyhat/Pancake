@@ -6,7 +6,8 @@ import Combine
 
 struct ResolvedAdaptiveMixItem {
     let suggestion: MusicSuggestion
-    let catalogSong: Song
+    let song: MusicSong
+    let catalogSong: Song?
 }
 
 struct AdaptiveMixCatalogResolutionReport {
@@ -44,13 +45,21 @@ final class MusicPlaybackManager: ObservableObject {
     /// Track last song ID to suppress duplicate nowPlayingItemChanged notifications
     private var lastReportedSongID: String?
     private var adaptiveCatalogSongsByID: [String: Song] = [:]
+    private var simulatedAdaptiveQueue: [MusicSong] = []
+    private var isSimulatedAdaptivePlaybackActive = false
+    private static let simulatedAdaptivePlaybackArgument = "--pancake-simulated-music"
+    private static let simulatedAdaptivePlaybackEnvironmentKey = "PANCAKE_SIMULATED_MUSIC"
+    private static let simulatedSongDuration: TimeInterval = 8
     
     var hasLibraryAccess: Bool {
         MPMediaLibrary.authorizationStatus() == .authorized
     }
 
     var hasCatalogAccess: Bool {
-        MusicKitService.shared.isAuthorized
+        if isSimulatedAdaptivePlaybackEnabled {
+            return true
+        }
+        return MusicKitService.shared.isAuthorized
     }
 
     var hasAvailablePlaybackSource: Bool {
@@ -58,7 +67,20 @@ final class MusicPlaybackManager: ObservableObject {
     }
 
     var hasActiveAdaptiveQueueEntry: Bool {
-        isAdaptivePlaybackActive && adaptiveMusicPlayer.queue.currentEntry != nil
+        if isSimulatedAdaptivePlaybackActive {
+            return currentSong != nil
+        }
+        return isAdaptivePlaybackActive && adaptiveMusicPlayer.queue.currentEntry != nil
+    }
+
+    private var isSimulatedAdaptivePlaybackEnabled: Bool {
+        #if DEBUG
+        let processInfo = ProcessInfo.processInfo
+        return processInfo.arguments.contains(Self.simulatedAdaptivePlaybackArgument) ||
+            processInfo.environment[Self.simulatedAdaptivePlaybackEnvironmentKey] == "1"
+        #else
+        return false
+        #endif
     }
 
     @discardableResult
@@ -156,7 +178,23 @@ final class MusicPlaybackManager: ObservableObject {
         excluding excludedSongKeys: Set<String>,
         limit: Int
     ) async -> AdaptiveMixCatalogResolutionReport {
-        guard hasCatalogAccess, limit > 0 else {
+        guard limit > 0 else {
+            return AdaptiveMixCatalogResolutionReport(
+                items: [],
+                attemptedSuggestionCount: 0,
+                rejectedSuggestionCount: 0
+            )
+        }
+
+        if isSimulatedAdaptivePlaybackEnabled {
+            return resolveSimulatedAdaptiveMixSuggestions(
+                suggestions,
+                excluding: excludedSongKeys,
+                limit: limit
+            )
+        }
+
+        guard hasCatalogAccess else {
             return AdaptiveMixCatalogResolutionReport(
                 items: [],
                 attemptedSuggestionCount: 0,
@@ -196,6 +234,7 @@ final class MusicPlaybackManager: ObservableObject {
                 resolved.append(
                     ResolvedAdaptiveMixItem(
                         suggestion: resolvedSuggestion,
+                        song: musicSong(from: catalogSong),
                         catalogSong: catalogSong
                     )
                 )
@@ -214,8 +253,18 @@ final class MusicPlaybackManager: ObservableObject {
 
     @discardableResult
     func startAdaptiveMix(with items: [ResolvedAdaptiveMixItem]) async -> Bool {
+        if isSimulatedAdaptivePlaybackEnabled {
+            return startSimulatedAdaptiveMix(with: items.map(\.song))
+        }
+
         guard hasCatalogAccess, !items.isEmpty else {
             updatePlaybackFailure(MusicError.catalogAccessRequired, state: "connect Apple Music playback for Adaptive Mix")
+            return false
+        }
+
+        let catalogSongs = items.compactMap(\.catalogSong)
+        guard catalogSongs.count == items.count else {
+            updatePlaybackFailure(MusicError.songUnavailable, state: "Adaptive Mix catalog resolution failed")
             return false
         }
 
@@ -223,9 +272,9 @@ final class MusicPlaybackManager: ObservableObject {
         musicPlayer.stop()
         adaptiveMusicPlayer.stop()
         adaptiveCatalogSongsByID = Dictionary(
-            uniqueKeysWithValues: items.map { ($0.catalogSong.id.rawValue, $0.catalogSong) }
+            uniqueKeysWithValues: catalogSongs.map { ($0.id.rawValue, $0) }
         )
-        adaptiveMusicPlayer.queue = ApplicationMusicPlayer.Queue(for: items.map(\.catalogSong))
+        adaptiveMusicPlayer.queue = ApplicationMusicPlayer.Queue(for: catalogSongs)
         adaptiveMusicPlayer.state.repeatMode = MusicKit.MusicPlayer.RepeatMode.none
         adaptiveMusicPlayer.state.shuffleMode = .off
 
@@ -249,18 +298,27 @@ final class MusicPlaybackManager: ObservableObject {
 
     @discardableResult
     func replaceAdaptiveMixUpcoming(with items: [ResolvedAdaptiveMixItem]) -> Bool {
+        if isSimulatedAdaptivePlaybackEnabled {
+            return replaceSimulatedAdaptiveMixUpcoming(with: items.map(\.song))
+        }
+
         guard isAdaptivePlaybackActive,
               !items.isEmpty,
               let currentEntry = adaptiveMusicPlayer.queue.currentEntry else {
             return false
         }
 
-        items.forEach {
-            adaptiveCatalogSongsByID[$0.catalogSong.id.rawValue] = $0.catalogSong
+        let catalogSongs = items.compactMap(\.catalogSong)
+        guard catalogSongs.count == items.count else {
+            return false
+        }
+
+        catalogSongs.forEach {
+            adaptiveCatalogSongsByID[$0.id.rawValue] = $0
         }
 
         var entries = adaptiveMusicPlayer.queue.entries
-        let replacementEntries = items.map { MusicKit.MusicPlayer.Queue.Entry($0.catalogSong) }
+        let replacementEntries = catalogSongs.map { MusicKit.MusicPlayer.Queue.Entry($0) }
 
         if let currentIndex = entries.firstIndex(where: { $0.id == currentEntry.id }) {
             let firstUpcomingIndex = entries.index(after: currentIndex)
@@ -279,6 +337,11 @@ final class MusicPlaybackManager: ObservableObject {
     func skipAdaptiveMixToNext() async {
         guard isAdaptivePlaybackActive else {
             skipToNext()
+            return
+        }
+
+        if isSimulatedAdaptivePlaybackActive {
+            advanceSimulatedAdaptiveMixQueue(reason: "skip")
             return
         }
 
@@ -869,6 +932,12 @@ final class MusicPlaybackManager: ObservableObject {
     func play() {
         configureAudioSession()
         if isAdaptivePlaybackActive {
+            if isSimulatedAdaptivePlaybackActive {
+                isPlaying = currentSong != nil
+                playbackStateDescription = isPlaying ? "adaptive mix playing (simulated)" : "adaptive mix stopped (simulated)"
+                return
+            }
+
             Task {
                 do {
                     try await adaptiveMusicPlayer.play()
@@ -887,6 +956,12 @@ final class MusicPlaybackManager: ObservableObject {
     
     func pause() {
         if isAdaptivePlaybackActive {
+            if isSimulatedAdaptivePlaybackActive {
+                isPlaying = false
+                playbackStateDescription = "adaptive mix paused (simulated)"
+                return
+            }
+
             adaptiveMusicPlayer.pause()
             syncAdaptiveMusicPlayerState()
             return
@@ -942,6 +1017,11 @@ final class MusicPlaybackManager: ObservableObject {
     }
     
     private func updatePlaybackTime() {
+        if isSimulatedAdaptivePlaybackActive {
+            updateSimulatedPlaybackTime()
+            return
+        }
+
         if isAdaptivePlaybackActive {
             syncAdaptiveMusicPlayerState()
             return
@@ -1000,17 +1080,28 @@ final class MusicPlaybackManager: ObservableObject {
     }
 
     private func stopAdaptivePlayback() {
-        guard isAdaptivePlaybackActive || adaptiveMusicPlayer.queue.currentEntry != nil else {
+        guard isAdaptivePlaybackActive ||
+                isSimulatedAdaptivePlaybackActive ||
+                adaptiveMusicPlayer.queue.currentEntry != nil else {
             return
         }
 
-        adaptiveMusicPlayer.stop()
+        if !isSimulatedAdaptivePlaybackActive {
+            adaptiveMusicPlayer.stop()
+        }
         isAdaptivePlaybackActive = false
+        isSimulatedAdaptivePlaybackActive = false
         adaptiveUpcomingSongs = []
+        simulatedAdaptiveQueue = []
         adaptiveCatalogSongsByID.removeAll()
     }
 
     private func syncAdaptiveMusicPlayerState() {
+        if isSimulatedAdaptivePlaybackActive {
+            syncSimulatedAdaptivePlaybackState()
+            return
+        }
+
         guard isAdaptivePlaybackActive else { return }
 
         currentPlaybackTime = adaptiveMusicPlayer.playbackTime
@@ -1084,6 +1175,152 @@ final class MusicPlaybackManager: ObservableObject {
             duration: catalogSong.duration ?? 0
         )
     }
+
+    private func resolveSimulatedAdaptiveMixSuggestions(
+        _ suggestions: [MusicSuggestion],
+        excluding excludedSongKeys: Set<String>,
+        limit: Int
+    ) -> AdaptiveMixCatalogResolutionReport {
+        var resolved: [ResolvedAdaptiveMixItem] = []
+        var resolvedKeys = Set<String>()
+        var attemptedSuggestionCount = 0
+        var rejectedSuggestionCount = 0
+
+        for suggestion in suggestions {
+            guard resolved.count < limit else { break }
+            attemptedSuggestionCount += 1
+
+            let cleanedSuggestion = suggestion.cleanedTitle()
+            let song = simulatedMusicSong(from: cleanedSuggestion)
+
+            guard AdaptiveMixPolicy.canQueue(
+                songKey: song.sessionSongKey,
+                playedSongKeys: excludedSongKeys,
+                temporarilyReservedSongKeys: resolvedKeys
+            ) else {
+                rejectedSuggestionCount += 1
+                print("Adaptive Mix skipped reserved or previously played simulated song: \(song.title) by \(song.artist)")
+                continue
+            }
+
+            resolvedKeys.insert(song.sessionSongKey)
+            print("Adaptive Mix verified simulated song \(song.id): \(song.title) by \(song.artist)")
+            resolved.append(
+                ResolvedAdaptiveMixItem(
+                    suggestion: cleanedSuggestion,
+                    song: song,
+                    catalogSong: nil
+                )
+            )
+        }
+
+        return AdaptiveMixCatalogResolutionReport(
+            items: resolved,
+            attemptedSuggestionCount: attemptedSuggestionCount,
+            rejectedSuggestionCount: rejectedSuggestionCount
+        )
+    }
+
+    private func simulatedMusicSong(from suggestion: MusicSuggestion) -> MusicSong {
+        let key = suggestion.sessionSongKey
+        return MusicSong(
+            id: "sim-\(key)",
+            title: suggestion.songTitle,
+            artist: suggestion.artist,
+            album: "Pancake Simulator",
+            artwork: nil,
+            duration: Self.simulatedSongDuration
+        )
+    }
+
+    @discardableResult
+    private func startSimulatedAdaptiveMix(with songs: [MusicSong]) -> Bool {
+        guard !songs.isEmpty else {
+            updatePlaybackFailure(MusicError.songUnavailable, state: "Adaptive Mix simulation has no songs")
+            return false
+        }
+
+        musicPlayer.stop()
+        adaptiveMusicPlayer.stop()
+        adaptiveCatalogSongsByID.removeAll()
+        simulatedAdaptiveQueue = songs
+        isAdaptivePlaybackActive = true
+        isSimulatedAdaptivePlaybackActive = true
+        playbackError = nil
+        playbackStateDescription = "adaptive mix playing (simulated)"
+        advanceSimulatedAdaptiveMixQueue(reason: "start")
+        startPlaybackTimer()
+        return currentSong != nil
+    }
+
+    @discardableResult
+    private func replaceSimulatedAdaptiveMixUpcoming(with songs: [MusicSong]) -> Bool {
+        guard isSimulatedAdaptivePlaybackActive,
+              currentSong != nil,
+              !songs.isEmpty else {
+            return false
+        }
+
+        simulatedAdaptiveQueue = songs
+        adaptiveUpcomingSongs = simulatedAdaptiveQueue
+        #if DEBUG
+        PancakeSimulatorLog("PANCAKE_SIM:UPCOMING songs=\(songs.map(\.sessionSongKey).joined(separator: ","))")
+        #endif
+        return true
+    }
+
+    private func advanceSimulatedAdaptiveMixQueue(reason: String) {
+        guard isSimulatedAdaptivePlaybackActive else { return }
+
+        guard !simulatedAdaptiveQueue.isEmpty else {
+            currentSong = nil
+            currentSongDuration = 0
+            currentPlaybackTime = 0
+            adaptiveUpcomingSongs = []
+            isPlaying = false
+            playbackStateDescription = "adaptive mix stopped (simulated)"
+            #if DEBUG
+            PancakeSimulatorLog("PANCAKE_SIM:ADVANCE reason=\(reason) queue=empty")
+            #endif
+            return
+        }
+
+        let nextSong = simulatedAdaptiveQueue.removeFirst()
+        currentSong = nextSong
+        currentSongDuration = nextSong.duration
+        currentPlaybackTime = 0
+        adaptiveUpcomingSongs = simulatedAdaptiveQueue
+        isPlaying = true
+        playbackStateDescription = "adaptive mix playing (simulated)"
+        lastReportedSongID = nextSong.id
+        #if DEBUG
+        PancakeSimulatorLog("PANCAKE_SIM:ADVANCE reason=\(reason) key=\(nextSong.sessionSongKey) upcoming=\(adaptiveUpcomingSongs.map(\.sessionSongKey).joined(separator: ","))")
+        #endif
+    }
+
+    private func updateSimulatedPlaybackTime() {
+        guard isPlaying, currentSong != nil else { return }
+
+        currentPlaybackTime += 1
+        if currentPlaybackTime >= currentSongDuration {
+            advanceSimulatedAdaptiveMixQueue(reason: "natural")
+        }
+    }
+
+    private func syncSimulatedAdaptivePlaybackState() {
+        guard isSimulatedAdaptivePlaybackActive else { return }
+
+        if currentSong == nil {
+            playbackStateDescription = "adaptive mix stopped (simulated)"
+            isPlaying = false
+        } else if isPlaying {
+            playbackStateDescription = "adaptive mix playing (simulated)"
+        } else {
+            playbackStateDescription = "adaptive mix paused (simulated)"
+        }
+
+        adaptiveUpcomingSongs = simulatedAdaptiveQueue
+    }
     
     @MainActor
     deinit {
@@ -1117,18 +1354,25 @@ struct WorkoutContext {
         recentSongs: [MusicSong]
     ) {
         self.segments = segments
-        self.currentSegmentIndex = min(currentSegmentIndex, segments.count - 1)
-        self.currentSegment = segments[self.currentSegmentIndex]
-        self.upcomingSegment = self.currentSegmentIndex + 1 < segments.count ? segments[self.currentSegmentIndex + 1] : nil
+        let boundedIndex = segments.isEmpty ? 0 : min(max(0, currentSegmentIndex), segments.count - 1)
+        self.currentSegmentIndex = boundedIndex
+        self.currentSegment = segments.isEmpty ? RunSegment() : segments[boundedIndex]
+        self.upcomingSegment = boundedIndex + 1 < segments.count ? segments[boundedIndex + 1] : nil
         self.totalDistance = totalDistance
         self.totalTime = totalTime
-        
+
         // Calculate current speed in km/h. totalDistance is tracked in km.
         let currentPace = totalTime > 0 ? (totalDistance / totalTime) * 3600.0 : nil
-        
+
         // Determine if user is actively exercising based on distance and time
         let isActive = totalDistance > 0.01 && totalTime > 30 // At least 10 meters in 30 seconds
-        
+
+        // Estimate remaining time in the current segment (time-based segments only;
+        // distance-based segments report 0 because their duration is unknown here).
+        let priorDurations = segments.prefix(boundedIndex).map { $0.targetDuration }.reduce(0, +)
+        let elapsedInCurrentSegment = max(0, totalTime - priorDurations)
+        let remainingInSegment = max(0, self.currentSegment.targetDuration - elapsedInCurrentSegment)
+
         self.musicContext = MusicContext(
             currentHeartRate: heartRate,
             guidanceHeartRate: smoothedHeartRate,
@@ -1136,7 +1380,7 @@ struct WorkoutContext {
             heartRateTrend: heartRateTrend,
             hasStableHeartRateSignal: hasStableHeartRateSignal,
             currentIntensity: currentSegment.intensity,
-            timeRemainingInSegment: currentSegment.targetDuration,
+            timeRemainingInSegment: remainingInSegment,
             currentSongEndingIn: currentSongEndingIn,
             userPreferences: UserProfileManager.shared.userProfile.musicPreferences,
             recentSongs: recentSongs,

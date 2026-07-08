@@ -89,19 +89,19 @@ final class HistoryViewModel: ObservableObject {
         return String(format: "%d:%02d/km", minutes, seconds)
     }
     
-    // MARK: - HealthKit Integration
+    // MARK: - Health Integration
     
-    /// Check if HealthKit is authorized
+    /// Check if Health access is ready
     var isHealthKitAuthorized: Bool {
         healthKitManager.isAuthorized
     }
     
-    /// Request HealthKit authorization
+    /// Request Health authorization
     func requestHealthKitAuthorization() {
         healthKitManager.requestAuthorization()
     }
     
-    /// Import outdoor running workouts from HealthKit
+    /// Import outdoor running workouts from Health
     func importFromHealthKit() async {
         guard !isImportingFromHealthKit else { return }
         
@@ -113,13 +113,13 @@ final class HistoryViewModel: ObservableObject {
             let importedCount = try await runHistoryStore.importFromHealthKit()
             
             if importedCount > 0 {
-                importResult = "Successfully imported \(importedCount) outdoor runs from HealthKit"
+                importResult = "Successfully imported \(importedCount) outdoor runs from Health"
             } else {
-                importResult = "No new outdoor runs found in HealthKit (minimum 0.5km)"
+                importResult = "No new outdoor runs found in Health (minimum 0.5km)"
             }
         } catch {
             self.error = error
-            importResult = "Failed to import from HealthKit: \(error.localizedDescription)"
+            importResult = "Failed to import from Health: \(error.localizedDescription)"
         }
         
         isImportingFromHealthKit = false

@@ -9,8 +9,6 @@ import SwiftUI
 import Charts
 
 struct ContentView: View {
-    @Environment(\.scenePhase) private var scenePhase
-    @StateObject private var viewModel = AppViewModel()
     @StateObject private var onboarding = OnboardingManager.shared
 
     var body: some View {
@@ -21,185 +19,6 @@ struct ContentView: View {
                 MainAppView()
             }
         }
-        .onAppear {
-            Task {
-                await viewModel.refreshAuthorizationState()
-            }
-            AuthManager.shared.validateCredentialState()
-        }
-        .onChange(of: scenePhase) { _, phase in
-            if phase == .active {
-                AuthManager.shared.validateCredentialState()
-            }
-        }
-    }
-}
-
-// MARK: - Sign In View
-struct SignInView: View {
-    @StateObject private var viewModel = SignInViewModel()
-    
-    var body: some View {
-        VStack(spacing: 32) {
-            Spacer()
-            
-            VStack(spacing: 16) {
-                Image(systemName: "figure.run.circle.fill")
-                    .font(.system(size: 80))
-                    .foregroundStyle(Color.pastelLavender)
-                
-                Text("Welcome to Pancake")
-                    .font(.largeTitle)
-                    .fontWeight(.bold)
-                
-                Text("Your personal running companion")
-                    .font(.title3)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-            }
-            
-            Spacer()
-            
-            VStack(spacing: 16) {
-                SignInWithAppleButtonView(authManager: AuthManager.shared)
-                    .padding(.horizontal, 40)
-                
-                if let error = viewModel.error {
-                    Text(error.localizedDescription)
-                        .font(.footnote)
-                        .foregroundStyle(Color.pastelCoral)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal)
-                }
-            }
-            
-            Spacer()
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.pastelGroupedBackground)
-    }
-}
-
-// MARK: - Permissions View
-struct PermissionsView: View {
-    @StateObject private var viewModel = PermissionsViewModel()
-    
-    var body: some View {
-        NavigationView {
-            ScrollView {
-                VStack(spacing: 24) {
-                    // Header
-                    VStack(spacing: 16) {
-                        Image(systemName: "checkmark.shield.fill")
-                            .font(.system(size: 60))
-                            .foregroundStyle(Color.pastelMint)
-                        
-                        Text("Permissions Required")
-                            .font(.title)
-                            .fontWeight(.bold)
-                        
-                        Text("Pancake needs access to your health and location data to track your runs effectively.")
-                            .font(.body)
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center)
-                            .padding(.horizontal)
-                    }
-                    .padding(.top, 40)
-                    
-                    // Permission Cards
-                    VStack(spacing: 16) {
-                        PermissionCardView(
-                            title: "Health Data",
-                            description: "Access to heart rate, calories, and workout data",
-                            icon: "heart.fill",
-                            isGranted: viewModel.healthKitAuthorized,
-                            isRequesting: viewModel.isRequestingHealth,
-                            onRequest: { viewModel.requestHealthAuthorization() }
-                        )
-                        
-                        PermissionCardView(
-                            title: "Location Services",
-                            description: "Access to location for tracking running distance and pace",
-                            icon: "location.fill",
-                            isGranted: viewModel.locationAuthorized,
-                            isRequesting: viewModel.isRequestingLocation,
-                            onRequest: { viewModel.requestLocationAuthorization() }
-                        )
-                    }
-                    .padding(.horizontal)
-                    
-                    Spacer(minLength: 40)
-                }
-            }
-            .navigationTitle("Setup")
-            .navigationBarTitleDisplayMode(.inline)
-        }
-    }
-}
-
-// MARK: - Permission Card View
-struct PermissionCardView: View {
-    let title: String
-    let description: String
-    let icon: String
-    let isGranted: Bool
-    let isRequesting: Bool
-    let onRequest: () -> Void
-    
-    var body: some View {
-        VStack(spacing: 16) {
-            HStack {
-                Image(systemName: icon)
-                    .font(.title2)
-                    .foregroundStyle(isGranted ? Color.pastelMint : Color.pastelLavender)
-                    .frame(width: 30)
-                
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(title)
-                        .font(.headline)
-                        .foregroundStyle(.primary)
-                    
-                    Text(description)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.leading)
-                }
-                
-                Spacer()
-                
-                if isGranted {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.title2)
-                        .foregroundStyle(Color.pastelMint)
-                }
-            }
-            
-            if !isGranted {
-                Button(action: onRequest) {
-                    HStack {
-                        if isRequesting {
-                            ProgressView()
-                                .scaleEffect(0.8)
-                                .foregroundColor(.white)
-                        }
-                        Text(isRequesting ? "Requesting..." : "Continue")
-                            .font(.subheadline)
-                            .fontWeight(.medium)
-                            .foregroundStyle(.white)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 14)
-                    .background(
-                        Capsule()
-                            .fill(LinearGradient.pastelPrimary)
-                            .shadow(color: Color.pastelLavender.opacity(0.4), radius: 6, x: 0, y: 3)
-                    )
-                    .clipShape(Capsule())
-                }
-                .disabled(isRequesting)
-            }
-        }
-        .bubblyCard()
     }
 }
 
@@ -231,15 +50,56 @@ struct MainAppView: View {
             }
         }
         .overlay(alignment: .top) {
-            if let warning = musicCoordinator.liveMetricsWarning {
-                LiveMetricsFallbackBanner(message: warning) {
-                    musicCoordinator.dismissLiveMetricsWarning()
+            VStack(spacing: 8) {
+                if musicCoordinator.isAdaptiveMixActive {
+                    AdaptiveMixStatusBanner(
+                        detail: musicCoordinator.adaptiveMixDetail,
+                        isCurating: musicCoordinator.isAdaptiveMixCurating
+                    )
                 }
-                .padding(.horizontal)
-                .padding(.top, 8)
-                .transition(.move(edge: .top).combined(with: .opacity))
+
+                if let warning = musicCoordinator.liveMetricsWarning {
+                    LiveMetricsFallbackBanner(message: warning) {
+                        musicCoordinator.dismissLiveMetricsWarning()
+                    }
+                }
             }
+            .padding(.horizontal)
+            .padding(.top, 8)
+            .transition(.move(edge: .top).combined(with: .opacity))
         }
+    }
+}
+
+private struct AdaptiveMixStatusBanner: View {
+    let detail: String
+    let isCurating: Bool
+
+    var body: some View {
+        HStack(spacing: 10) {
+            if isCurating {
+                ProgressView()
+            } else {
+                Image(systemName: "waveform.path.ecg")
+                    .foregroundStyle(Color.pastelMint)
+            }
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Adaptive Mix")
+                    .font(.footnote.weight(.semibold))
+
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(12)
+        .background(.thinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .shadow(color: .black.opacity(0.12), radius: 12, x: 0, y: 4)
     }
 }
 
@@ -281,7 +141,7 @@ struct RunSetupView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 24) {
-                if !onboarding.requiredRunSetupComplete {
+                if !onboarding.watchReady {
                     RunSetupReadinessCard(onboarding: onboarding)
                 }
 
@@ -295,7 +155,7 @@ struct RunSetupView: View {
                         .font(.title)
                         .fontWeight(.bold)
                     
-                    Text("Set up your workout segments and start on your Apple Watch")
+                    Text("Set up your workout segments and start from your watch companion")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
@@ -323,7 +183,7 @@ struct RunSetupView: View {
         }
         .navigationTitle("Run Setup")
         .navigationBarTitleDisplayMode(.inline)
-        .alert("Apple Watch", isPresented: $viewModel.showingWatchAlert) {
+        .alert("Watch", isPresented: $viewModel.showingWatchAlert) {
             Button("OK", role: .cancel) { 
                 viewModel.dismissAlert()
             }
@@ -348,7 +208,7 @@ private struct RunSetupReadinessCard: View {
                 Spacer()
             }
 
-            Text(onboarding.missingRunSetupMessage)
+            Text("Pair a watch and install the Pancake watch companion before starting a guided run.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
 
@@ -565,7 +425,7 @@ struct StartRunButton: View {
                 HStack {
                     Image(systemName: "applewatch")
                         .foregroundColor(.pastelMint)
-                    Text("Apple Watch Connected")
+                    Text("Watch connected")
                         .font(.caption)
                         .foregroundColor(.pastelMint)
                 }
@@ -574,7 +434,7 @@ struct StartRunButton: View {
                     HStack {
                         Image(systemName: "applewatch.slash")
                             .foregroundColor(.pastelPeach)
-                        Text("Apple Watch Status")
+                        Text("Watch status")
                             .font(.caption)
                             .foregroundColor(.pastelPeach)
                     }
@@ -602,7 +462,7 @@ struct StartRunButton: View {
                     } else {
                         Image(systemName: "applewatch")
                     }
-                    Text(viewModel.isStartingRun ? "Starting Music..." : "Start Run on Apple Watch")
+                    Text(viewModel.isStartingRun ? "Sending Plan..." : "Send run plan")
                 }
                 .font(.headline)
                 .fontWeight(.semibold)
@@ -750,7 +610,7 @@ struct EmptyHistoryView: View {
                 .font(.title2)
                 .fontWeight(.semibold)
             
-            Text("Complete your first run using your Apple Watch to see it here")
+            Text("Complete your first watch-guided run to see it here")
                 .font(.body)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)

@@ -79,7 +79,13 @@ final class UserProfileViewModel: ObservableObject {
     }
 
     var musicAuthorizationStatus: String {
-        profileManager.musicAuthorizationStatus.description
+        switch profileManager.musicAuthorizationStatus {
+        case .notDetermined: return "Not Determined"
+        case .denied: return "Denied"
+        case .restricted: return "Restricted"
+        case .authorized: return "Authorized"
+        @unknown default: return "Unknown"
+        }
     }
 
     var catalogAuthorizationStatus: String {

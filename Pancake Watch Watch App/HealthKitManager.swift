@@ -14,6 +14,8 @@ final class HealthKitManager: ObservableObject {
     // MARK: - HealthKit Types
     private let readTypes: Set<HKObjectType>
     private let shareTypes: Set<HKSampleType>
+    private static let simulatedRunArgument = "--pancake-simulated-run"
+    private static let simulatedRunEnvironmentKey = "PANCAKE_SIMULATED_RUN"
 
     private init() {
         // Define the types we want to read and write
@@ -43,6 +45,15 @@ final class HealthKitManager: ObservableObject {
         
         self.readTypes = readTypes
         self.shareTypes = shareTypes
+
+        #if DEBUG
+        if Self.isSimulatedRunEnabled {
+            isAuthorized = true
+            missingRequiredShareTypeNames = []
+            lastAuthorizationError = nil
+            return
+        }
+        #endif
         
         // Proactively check authorization status on init
         Task { [weak self] in
@@ -50,7 +61,26 @@ final class HealthKitManager: ObservableObject {
         }
     }
 
+    private static var isSimulatedRunEnabled: Bool {
+        #if DEBUG
+        let processInfo = ProcessInfo.processInfo
+        return processInfo.arguments.contains(simulatedRunArgument) ||
+            processInfo.environment[simulatedRunEnvironmentKey] == "1"
+        #else
+        return false
+        #endif
+    }
+
     func requestAuthorization() {
+        #if DEBUG
+        if Self.isSimulatedRunEnabled {
+            isAuthorized = true
+            missingRequiredShareTypeNames = []
+            lastAuthorizationError = nil
+            return
+        }
+        #endif
+
         guard HKHealthStore.isHealthDataAvailable() else {
             self.isAuthorized = false
             self.missingRequiredShareTypeNames = []
@@ -69,6 +99,15 @@ final class HealthKitManager: ObservableObject {
     }
 
     func refreshAuthorizationState() async {
+        #if DEBUG
+        if Self.isSimulatedRunEnabled {
+            isAuthorized = true
+            missingRequiredShareTypeNames = []
+            lastAuthorizationError = nil
+            return
+        }
+        #endif
+
         guard HKHealthStore.isHealthDataAvailable() else {
             self.isAuthorized = false
             self.missingRequiredShareTypeNames = []
@@ -152,11 +191,11 @@ enum HealthKitError: LocalizedError {
         case .notAvailable:
             return "Health data is not available on this device"
         case .notAuthorized:
-            return "HealthKit authorization is required"
+            return "Health access is needed before starting a workout"
         case .missingRequiredShareTypes(let names):
-            return "HealthKit needs write access for: \(names.joined(separator: ", "))"
+            return "Health needs write access for: \(names.joined(separator: ", "))"
         case .requestFailed:
-            return "Failed to request HealthKit authorization"
+            return "Failed to request Health access"
         }
     }
 }

@@ -3,7 +3,6 @@ import Foundation
 
 enum OnboardingStep: Int, CaseIterable, Identifiable {
     case welcome
-    case account
     case runAccess
     case music
     case songCheck
@@ -14,8 +13,7 @@ enum OnboardingStep: Int, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .welcome: return "Welcome"
-        case .account: return "Account"
-        case .runAccess: return "Run access"
+        case .runAccess: return "History"
         case .music: return "Music"
         case .songCheck: return "Song check"
         case .watch: return "Watch"
@@ -25,7 +23,6 @@ enum OnboardingStep: Int, CaseIterable, Identifiable {
     var icon: String {
         switch self {
         case .welcome: return "figure.run.circle.fill"
-        case .account: return "person.crop.circle.badge.checkmark"
         case .runAccess: return "heart.text.square.fill"
         case .music: return "music.note.list"
         case .songCheck: return "play.circle.fill"
@@ -44,9 +41,7 @@ final class OnboardingManager: ObservableObject {
     @Published var lastError: Error?
 
     private let completionKey = "OnboardingManager.hasCompletedOnboarding"
-    private let authManager = AuthManager.shared
     private let healthKitManager = HealthKitManager.shared
-    private let locationManager = LocationManager.shared
     private let profileManager = UserProfileManager.shared
     private let musicKitService = MusicKitService.shared
     private let musicManager = MusicPlaybackManager.shared
@@ -58,20 +53,8 @@ final class OnboardingManager: ObservableObject {
         bindDependencies()
     }
 
-    var accountReady: Bool {
-        authManager.isAuthenticated
-    }
-
     var healthReady: Bool {
         healthKitManager.isAuthorized
-    }
-
-    var locationReady: Bool {
-        locationManager.isAuthorized
-    }
-
-    var runAccessReady: Bool {
-        healthReady && locationReady
     }
 
     var libraryReady: Bool {
@@ -98,22 +81,8 @@ final class OnboardingManager: ObservableObject {
         watchConnectivity.isWatchPaired && watchConnectivity.isWatchAppInstalled
     }
 
-    var requiredRunSetupComplete: Bool {
-        runAccessReady && musicPlaybackReady
-    }
-
     var activationReady: Bool {
-        requiredRunSetupComplete && musicTasteReady
-    }
-
-    var missingRunSetupMessage: String {
-        if !runAccessReady {
-            return "Finish Health and location setup before starting a run."
-        }
-        if !musicPlaybackReady {
-            return MusicError.noPlayableMusicSource.localizedDescription
-        }
-        return "Setup is ready."
+        watchReady
     }
 
     func completeOnboarding() {
@@ -146,10 +115,6 @@ final class OnboardingManager: ObservableObject {
         healthKitManager.requestAuthorization()
     }
 
-    func requestLocationAuthorization() {
-        locationManager.requestAuthorization()
-    }
-
     func requestLibraryAuthorization() {
         profileManager.requestMusicAuthorization()
     }
@@ -176,9 +141,7 @@ final class OnboardingManager: ObservableObject {
 
     private func bindDependencies() {
         let publishers: [AnyPublisher<Void, Never>] = [
-            authManager.objectWillChange.map { _ in () }.eraseToAnyPublisher(),
             healthKitManager.objectWillChange.map { _ in () }.eraseToAnyPublisher(),
-            locationManager.objectWillChange.map { _ in () }.eraseToAnyPublisher(),
             profileManager.objectWillChange.map { _ in () }.eraseToAnyPublisher(),
             musicKitService.objectWillChange.map { _ in () }.eraseToAnyPublisher(),
             watchConnectivity.objectWillChange.map { _ in () }.eraseToAnyPublisher()

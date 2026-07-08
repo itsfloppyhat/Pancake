@@ -37,6 +37,9 @@ struct PromptLabView: View {
             .onAppear {
                 viewModel.refreshAuthorizationState()
             }
+            .onDisappear {
+                viewModel.endSongCheck()
+            }
         }
     }
 
@@ -57,7 +60,7 @@ struct PromptLabView: View {
     @ViewBuilder
     private var promptSections: some View {
         Section {
-            Text("Build a sample run moment, then generate and play a song without starting a workout.")
+            Text("Preview an Adaptive Mix against simulated running metrics without starting a workout.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
 
@@ -69,6 +72,8 @@ struct PromptLabView: View {
         } header: {
             Text("Song Check")
         }
+
+        adaptiveMixPreviewSection
 
         Section("Taste Inputs") {
             VStack(alignment: .leading, spacing: 8) {
@@ -115,9 +120,9 @@ struct PromptLabView: View {
             PromptLabAccessRow(
                 icon: "music.note.list",
                 title: "Library Taste Import",
-                subtitle: viewModel.isLibraryAuthorized ? "Library access is ready." : "Needed for library-only tests and taste import.",
+                subtitle: viewModel.isLibraryAuthorized ? "Library access is ready." : "Optional. Import taste or play songs saved in your library.",
                 isConnected: viewModel.isLibraryAuthorized,
-                buttonTitle: "Connect"
+                buttonTitle: "Continue"
             ) {
                 viewModel.requestLibraryAuthorization()
             }
@@ -125,7 +130,7 @@ struct PromptLabView: View {
             PromptLabAccessRow(
                 icon: "play.circle",
                 title: "Apple Music Playback",
-                subtitle: viewModel.isCatalogAuthorized ? "Catalog playback is ready." : "Needed to force the Apple Music playback path.",
+                subtitle: viewModel.isCatalogAuthorized ? "Catalog playback is ready." : "Optional. Play suggestions from the Apple Music catalog.",
                 isConnected: viewModel.isCatalogAuthorized,
                 buttonTitle: "Continue"
             ) {
@@ -134,12 +139,9 @@ struct PromptLabView: View {
                 }
             }
 
-            Text(viewModel.effectiveSourceModeDescription)
-                .font(.caption)
-                .foregroundStyle(.secondary)
         }
 
-        Section("Scenario Builder") {
+        Section("During-Run Metrics") {
             Picker("Workout Phase", selection: $viewModel.selectedWorkoutPhase) {
                 ForEach(WorkoutPhase.allCases) { phase in
                     Text(phase.displayName).tag(phase)
@@ -149,12 +151,6 @@ struct PromptLabView: View {
             Picker("Target Zone", selection: $viewModel.selectedIntensity) {
                 ForEach(Intensity.allCases) { intensity in
                     Text(intensity.label).tag(intensity)
-                }
-            }
-
-            Picker("Source Mode", selection: $viewModel.sourceMode) {
-                ForEach(PromptLabSourceMode.allCases) { mode in
-                    Text(mode.displayName).tag(mode)
                 }
             }
 
@@ -273,75 +269,108 @@ struct PromptLabView: View {
         }
 #endif
 
-        Section("Generate And Play") {
+    }
+
+    @ViewBuilder
+    private var adaptiveMixPreviewSection: some View {
+        Section("Adaptive Mix Preview") {
             Button {
                 Task {
-                    await viewModel.generateSuggestion()
+                    await viewModel.startAdaptiveMixPreview()
                 }
             } label: {
-                Label(viewModel.isGenerating ? "Generating..." : "Generate Song", systemImage: "sparkles")
+                Label(
+                    viewModel.isAdaptiveMixPreviewActive ? "Refresh Upcoming Songs" : "Generate And Play Mix",
+                    systemImage: viewModel.isAdaptiveMixPreviewActive ? "arrow.clockwise" : "play.circle.fill"
+                )
             }
-            .disabled(viewModel.isGenerating || !viewModel.isAIConfigured)
+            .disabled(viewModel.isGenerating || !viewModel.isCatalogAuthorized)
 
-            Button {
-                Task {
-                    await viewModel.generateAndPlaySuggestion()
-                }
-            } label: {
-                Label("Generate And Play", systemImage: "play.circle.fill")
-            }
-            .disabled(viewModel.isGenerating || !viewModel.isAIConfigured)
-
-            if let suggestion = viewModel.generatedSuggestion {
-                GeneratedSuggestionCard(suggestion: suggestion)
-
-                Button {
-                    Task {
-                        await viewModel.playGeneratedSuggestion()
-                    }
-                } label: {
-                    Label("Play Suggestion", systemImage: "play.fill")
-                }
-
-                Button {
-                    Task {
-                        await viewModel.playGeneratedSuggestionViaAppleMusic()
-                    }
-                } label: {
-                    Label("Play Via Apple Music", systemImage: "music.note")
-                }
-                .disabled(!viewModel.isCatalogAuthorized)
-            }
-
-            if let currentSong = viewModel.currentSong {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Current Playback")
-                        .font(.headline)
-                    Text(currentSong.title)
+            if viewModel.isGenerating {
+                HStack(spacing: 10) {
+                    ProgressView()
+                    Text("Curating verified Apple Music songs")
                         .font(.subheadline)
-                        .fontWeight(.semibold)
-                    Text(currentSong.artist)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text(viewModel.playbackStateDescription.capitalized)
-                        .font(.caption)
                         .foregroundStyle(.secondary)
                 }
             }
 
-            if viewModel.currentSong != nil {
-                HStack {
-                    if !viewModel.isPlaying {
-                        Button("Resume") {
+            if viewModel.isAdaptiveMixPreviewActive {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Label("Next refresh", systemImage: "timer")
+                            .font(.subheadline.weight(.semibold))
+
+                        Spacer()
+
+                        Text("\(viewModel.adaptiveMixPreviewSecondsUntilRefresh)s")
+                            .font(.system(.body, design: .monospaced).weight(.semibold))
+                            .foregroundStyle(.secondary)
+                    }
+
+                    ProgressView(value: viewModel.adaptiveMixPreviewProgress)
+                        .tint(.pastelMint)
+
+                    Text(viewModel.adaptiveMixPreviewDetail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                if let currentSong = viewModel.currentSong {
+                    SongCheckNowPlayingRow(
+                        song: currentSong,
+                        playbackState: viewModel.playbackStateDescription
+                    )
+                }
+
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Upcoming Playlist")
+                        .font(.subheadline.weight(.semibold))
+
+                    ForEach(Array(viewModel.adaptiveMixPreviewQueue.enumerated()), id: \.element.id) { index, song in
+                        SongCheckQueueRow(position: index + 1, song: song)
+                    }
+                }
+                .padding(.vertical, 4)
+
+                HStack(spacing: 12) {
+                    Button {
+                        if viewModel.isPlaying {
+                            viewModel.pausePlayback()
+                        } else {
                             viewModel.resumePlayback()
                         }
+                    } label: {
+                        Image(systemName: viewModel.isPlaying ? "pause.fill" : "play.fill")
+                            .frame(width: 24, height: 24)
                     }
+                    .buttonStyle(.bordered)
+                    .help(viewModel.isPlaying ? "Pause" : "Resume")
+                    .accessibilityLabel(viewModel.isPlaying ? "Pause" : "Resume")
+
+                    Button {
+                        Task {
+                            await viewModel.skipAdaptiveMixPreviewToNext()
+                        }
+                    } label: {
+                        Image(systemName: "forward.end.fill")
+                            .frame(width: 24, height: 24)
+                    }
+                    .buttonStyle(.bordered)
+                    .help("Next Song")
+                    .accessibilityLabel("Next Song")
 
                     Spacer()
 
-                    Button("Stop") {
+                    Button(role: .destructive) {
                         viewModel.stopPlayback()
+                    } label: {
+                        Image(systemName: "stop.fill")
+                            .frame(width: 24, height: 24)
                     }
+                    .buttonStyle(.bordered)
+                    .help("Stop")
+                    .accessibilityLabel("Stop")
                 }
             }
 
@@ -423,6 +452,71 @@ private struct PromptPreviewCard: View {
                 .textSelection(.enabled)
         }
         .padding(.vertical, 4)
+    }
+}
+
+private struct SongCheckNowPlayingRow: View {
+    let song: MusicSong
+    let playbackState: String
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "waveform.circle.fill")
+                .font(.title2)
+                .foregroundStyle(Color.pastelMint)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Now Playing")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Text(song.title)
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(1)
+                Text(song.artist)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 8)
+
+            Text(playbackState.capitalized)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 4)
+    }
+}
+
+private struct SongCheckQueueRow: View {
+    let position: Int
+    let song: MusicSong
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Text("\(position)")
+                .font(.caption.weight(.bold))
+                .foregroundStyle(Color.pastelPeriwinkle)
+                .frame(width: 22, height: 22)
+                .background(Color.pastelPeriwinkle.opacity(0.14))
+                .clipShape(Circle())
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(song.title)
+                    .font(.subheadline.weight(.medium))
+                    .lineLimit(1)
+                Text(song.artist)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 0)
+
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(Color.pastelMint)
+                .accessibilityLabel("Verified Apple Music song")
+        }
     }
 }
 

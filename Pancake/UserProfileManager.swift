@@ -41,6 +41,11 @@ final class UserProfileManager: ObservableObject {
         userProfile.personalInfo = info
         saveProfile()
     }
+
+    func resetProfile() {
+        userProfile = UserProfile()
+        UserDefaults.standard.removeObject(forKey: storageKey)
+    }
     
     // MARK: - Music Preferences Management
     
@@ -543,9 +548,9 @@ enum MusicError: LocalizedError {
         case .playlistNotFound:
             return "The selected playlist could not be found in your library"
         case .catalogAccessRequired:
-            return "Enable Apple Music playback so Pancake can play generated songs that are not already in your library."
+            return "Apple Music playback lets Pancake play generated songs that are not already in your library."
         case .noPlayableMusicSource:
-            return "Pancake needs either music-library access or Apple Music playback access before it can start a music-guided run."
+            return "Connect your music library or Apple Music playback before requesting a song suggestion."
         case .songUnavailable:
             return "That generated song could not be found in your library or Apple Music right now."
         case .playbackFailed:

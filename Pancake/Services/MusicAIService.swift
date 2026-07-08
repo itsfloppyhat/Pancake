@@ -18,9 +18,9 @@ enum AIUnavailabilityReason: Equatable {
     var userMessage: String {
         switch self {
         case .appleIntelligenceNotEnabled:
-            return "Apple Intelligence is not enabled. Go to Settings > Apple Intelligence & Siri to enable it."
+            return "On-device AI is not enabled. Check Settings before using AI music features."
         case .deviceNotEligible:
-            return "This device does not support Apple Intelligence. AI music features require a compatible iPhone."
+            return "This device does not support on-device AI music features."
         case .modelNotReady:
             return "The AI model is still downloading. Please try again in a few minutes."
         case .unknown:
@@ -69,6 +69,12 @@ struct GenerableMusicSuggestion {
 
     @Guide(description: "Confidence score for this suggestion", .range(0.0...1.0))
     let confidence: Double
+}
+
+@Generable
+struct GenerableAdaptiveMix {
+    @Guide(description: "Exactly three distinct real, commercially released songs for the next adaptive running queue. Do not repeat a song.", .count(3))
+    let suggestions: [GenerableMusicSuggestion]
 }
 
 @Generable
@@ -210,9 +216,10 @@ final class MusicAIService: ObservableObject {
     }
 
     private func loadLibrarySelectionProbability() {
-        librarySelectionProbability = UserDefaults.standard.double(forKey: "AI_LibrarySelectionProbability")
-        if librarySelectionProbability == 0.0 {
+        if UserDefaults.standard.object(forKey: "AI_LibrarySelectionProbability") == nil {
             librarySelectionProbability = 0.45 // Default to 45%
+        } else {
+            librarySelectionProbability = UserDefaults.standard.double(forKey: "AI_LibrarySelectionProbability")
         }
     }
 
@@ -221,39 +228,6 @@ final class MusicAIService: ObservableObject {
     }
 
     // MARK: - Music Suggestion Generation
-
-    /// Get a random song from user's library based on their preferences
-    func getRandomLibrarySong(
-        preferences: MusicPreferences,
-        intensity: Intensity
-    ) async throws -> MusicSuggestion {
-        try checkAvailabilityOrThrow()
-        guard acquireGenerationLock() else { throw MusicAIError.generationFailed(ConcurrentRequestError()) }
-
-        isGenerating = true
-        lastError = nil
-
-        defer {
-            isGenerating = false
-            releaseGenerationLock()
-        }
-
-        let prompt = buildRandomLibrarySongPrompt(preferences: preferences, intensity: intensity)
-
-        do {
-            let response = try await withRequestTimeout {
-                let session = self.createSession()
-                return try await session.respond(to: prompt, generating: GenerableMusicSuggestion.self)
-            }
-
-            let suggestion = mapToMusicSuggestion(response.content)
-
-            return suggestion
-        } catch {
-            lastError = error
-            throw MusicAIError.generationFailed(error)
-        }
-    }
 
     func generateMusicSuggestion(
         context: MusicContext,
@@ -291,9 +265,6 @@ final class MusicAIService: ObservableObject {
             }
 
             let suggestion = mapToMusicSuggestion(response.content)
-
-            // Track this suggestion for variety
-            trackSuggestion(suggestion)
 
             return suggestion
         } catch {
@@ -342,9 +313,6 @@ final class MusicAIService: ObservableObject {
             }
 
             let suggestion = mapToMusicSuggestion(response.content)
-
-            // Track this suggestion for variety
-            trackSuggestion(suggestion)
 
             return suggestion
         } catch {
@@ -398,10 +366,61 @@ final class MusicAIService: ObservableObject {
 
             let suggestion = mapToMusicSuggestion(response.content)
 
-            // Track this suggestion for variety
-            trackSuggestion(suggestion)
-
             return suggestion
+        } catch {
+            lastError = error
+            throw MusicAIError.generationFailed(error)
+        }
+    }
+
+    func generateAdaptiveMixSuggestions(
+        context: MusicContext,
+        userPreferences: MusicPreferences,
+        goalScore: AdaptiveMixGoalScore,
+        avoidedSongs: [MusicSong] = []
+    ) async throws -> [MusicSuggestion] {
+        try checkAvailabilityOrThrow()
+        guard acquireGenerationLock() else { throw MusicAIError.generationFailed(ConcurrentRequestError()) }
+
+        isGenerating = true
+        lastError = nil
+
+        defer {
+            isGenerating = false
+            releaseGenerationLock()
+        }
+
+        let basePrompt = buildMusicSuggestionPrompt(
+            context: context,
+            preferences: userPreferences,
+            preferLibrarySelection: false,
+            mustUseLibrary: false,
+            avoidedSongs: avoidedSongs
+        )
+        let prompt = """
+        \(basePrompt)
+
+        ADAPTIVE MIX QUEUE:
+        - Return exactly three distinct next-song options.
+        - These songs will be queued behind the currently playing song.
+        - Do not pick a song for an exact timestamp. The runner may press Next, or normal playback may advance when the current song finishes.
+        - Goal alignment score: \(goalScore.alignmentScore)/100.
+        - Guidance: \(goalScore.guidance.promptDescription)
+        """
+
+        do {
+            let response = try await withRequestTimeout {
+                let session = self.createSession()
+                return try await session.respond(to: prompt, generating: GenerableAdaptiveMix.self)
+            }
+
+            var uniqueKeys = Set<String>()
+            let suggestions = response.content.suggestions
+                .map(mapToMusicSuggestion)
+                .map { $0.cleanedTitle() }
+                .filter { uniqueKeys.insert($0.sessionSongKey).inserted }
+
+            return suggestions
         } catch {
             lastError = error
             throw MusicAIError.generationFailed(error)
@@ -516,22 +535,20 @@ final class MusicAIService: ObservableObject {
 
     // MARK: - Variety Management
 
-    private func trackSuggestion(_ suggestion: MusicSuggestion) {
+    private func trackSongIdentity(title: String, artist: String) {
         guard isVarietySessionActive else {
             return
         }
 
-        // Clean the title before tracking so the avoid-list uses the real song name
-        let cleaned = suggestion.cleanedTitle()
-        let suggestionKey = "\(cleaned.artist) - \(cleaned.songTitle)"
-        let normalizedKey = cleaned.sessionSongKey
+        let suggestionKey = "\(artist) - \(title)"
+        let normalizedKey = "\(artist.normalizedMusicIdentity)|\(title.normalizedMusicIdentity)"
 
-        // Don't add duplicates — the AI already suggested this exact song
+        // The avoid list represents songs that actually played during this workout.
         guard recentSuggestionKeys.insert(normalizedKey).inserted else {
             return
         }
 
-        // Track ALL songs for the session — no cap, songs should never repeat
+        // Track all played songs for the workout so the AI does not repeat them.
         recentSuggestions.append(suggestionKey)
     }
 
@@ -551,8 +568,8 @@ final class MusicAIService: ObservableObject {
         recentSuggestionKeys.removeAll()
     }
 
-    func registerSessionSuggestion(_ suggestion: MusicSuggestion) {
-        trackSuggestion(suggestion)
+    func registerPlayedSong(_ song: MusicSong) {
+        trackSongIdentity(title: song.title, artist: song.artist)
     }
 
     func fallbackSuggestion(
@@ -1159,23 +1176,6 @@ final class MusicAIService: ObservableObject {
         """
     }
 
-    private func buildRandomLibrarySongPrompt(preferences: MusicPreferences, intensity: Intensity) -> String {
-        let tasteProfile = MusicTasteProfileBuilder.build(from: preferences)
-
-        return """
-        You are a music curator for running workouts. I need a random song from my music library for a \(intensity.label) intensity workout.
-
-        The runner's library taste profile is:
-        - \(tasteProfile.conciseSummary)
-        - Strong artists: \(tasteProfile.libraryArtistPrompt)
-        - Genres: \(tasteProfile.genrePrompt)
-
-        Please select a random song from my library that would work well for a \(intensity.label) effort workout. Choose something that matches the energy level and would keep me motivated.
-
-        If I have no favorites specified, suggest a popular song that would work well for this intensity level.
-        """
-    }
-
     private func buildMotivationalSpeechPrompt(workoutSummary: String) -> String {
         return """
         You are a motivational running coach. Give a short, inspiring speech to prepare someone for their upcoming run.
@@ -1531,6 +1531,16 @@ final class MusicAIService: ObservableObject {
 extension MusicAIService {
     /// Pre-curated suggestions when AI is unavailable
     static func fallbackSuggestion(for intensity: Intensity) -> MusicSuggestion {
+        fallbackSuggestions(for: intensity).randomElement() ?? MusicSuggestion(
+            songTitle: "Don't Stop Me Now",
+            artist: "Queen",
+            reason: "Classic workout anthem",
+            mood: .energetic,
+            confidence: 0.5
+        )
+    }
+
+    static func fallbackSuggestions(for intensity: Intensity) -> [MusicSuggestion] {
         let suggestions: [Intensity: [MusicSuggestion]] = [
             .zone1: [
                 MusicSuggestion(songTitle: "Banana Pancakes", artist: "Jack Johnson", reason: "Low-arousal recovery music for Zone 1.", mood: .calming, confidence: 0.7),
@@ -1558,13 +1568,7 @@ extension MusicAIService {
                 MusicSuggestion(songTitle: "Titanium", artist: "David Guetta", reason: "High-energy peak-effort track with a strong hook.", mood: .intense, confidence: 0.7)
             ]
         ]
-        return suggestions[intensity]?.randomElement() ?? MusicSuggestion(
-            songTitle: "Don't Stop Me Now",
-            artist: "Queen",
-            reason: "Classic workout anthem",
-            mood: .energetic,
-            confidence: 0.5
-        )
+        return suggestions[intensity] ?? []
     }
 
     static let fallbackMotivationalSpeeches: [String] = [

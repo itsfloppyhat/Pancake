@@ -2,6 +2,14 @@ import Foundation
 import WatchConnectivity
 import Combine
 
+/// A cheer forwarded from the iPhone during a run.
+struct ReceivedCheer: Identifiable, Equatable {
+    let id: String
+    let senderName: String
+    let message: String
+    let receivedAt: Date
+}
+
 final class WatchConnectivityManager: NSObject, ObservableObject {
     static let shared = WatchConnectivityManager()
     
@@ -16,6 +24,19 @@ final class WatchConnectivityManager: NSObject, ObservableObject {
     @Published var currentSong: MusicSong?
     @Published var isPlaying: Bool = false
     @Published var playbackState: String = "stopped"
+    @Published var isAdaptiveMixActive = false
+    @Published var isAdaptiveMixCurating = false
+    @Published var adaptiveMixQueuedSongCount = 0
+    @Published var adaptiveMixPlayedSongCount = 0
+    @Published var adaptiveMixStatus = "Adaptive Mix is off"
+    @Published var adaptiveMixRevision = 0
+    @Published var adaptiveMixTargetZone: String?
+    @Published var adaptiveMixAlignmentScore: Int?
+    @Published var adaptiveMixReplacedSongCount = 0
+    @Published var adaptiveMixGuidanceText: String?
+    @Published var adaptiveMixNextSongTitle: String?
+    @Published var adaptiveMixNextSongArtist: String?
+    @Published var lastCheer: ReceivedCheer?
     
     private override init() {
         super.init()
@@ -74,6 +95,26 @@ final class WatchConnectivityManager: NSObject, ObservableObject {
     func clearReceivedRunPlan() {
         receivedRunPlan = []
         hasReceivedRunPlan = false
+    }
+
+    func sendMusicControl(_ action: String) {
+        guard WCSession.isSupported() else { return }
+
+        let message: [String: Any] = [
+            "type": "musicControl",
+            "action": action
+        ]
+
+        if WCSession.default.isReachable {
+            WCSession.default.sendMessage(message, replyHandler: nil) { [weak self] error in
+                WCSession.default.transferUserInfo(message)
+                DispatchQueue.main.async {
+                    self?.lastError = error
+                }
+            }
+        } else {
+            WCSession.default.transferUserInfo(message)
+        }
     }
 }
 
@@ -156,6 +197,29 @@ extension WatchConnectivityManager: WCSessionDelegate {
             }
             if let state = message["state"] as? String {
                 self.playbackState = state
+            }
+        case WatchMessageType.adaptiveMixState.rawValue:
+            self.isAdaptiveMixActive = message["isActive"] as? Bool ?? false
+            self.isAdaptiveMixCurating = message["isCurating"] as? Bool ?? false
+            self.adaptiveMixQueuedSongCount = message["queuedSongCount"] as? Int ?? 0
+            self.adaptiveMixPlayedSongCount = message["playedSongCount"] as? Int ?? 0
+            self.adaptiveMixStatus = message["status"] as? String ?? "Adaptive Mix is off"
+            self.adaptiveMixRevision = message["revision"] as? Int ?? self.adaptiveMixRevision
+            self.adaptiveMixTargetZone = message["targetZone"] as? String
+            self.adaptiveMixAlignmentScore = message["alignmentScore"] as? Int
+            self.adaptiveMixReplacedSongCount = message["replacedSongCount"] as? Int ?? 0
+            self.adaptiveMixGuidanceText = message["guidanceText"] as? String
+            self.adaptiveMixNextSongTitle = message["nextSongTitle"] as? String
+            self.adaptiveMixNextSongArtist = message["nextSongArtist"] as? String
+        case WatchMessageType.cheer.rawValue:
+            if let sender = message["senderName"] as? String,
+               let text = message["message"] as? String {
+                self.lastCheer = ReceivedCheer(
+                    id: message["id"] as? String ?? UUID().uuidString,
+                    senderName: sender,
+                    message: text,
+                    receivedAt: Date()
+                )
             }
         default:
             break

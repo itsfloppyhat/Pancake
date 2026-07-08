@@ -273,8 +273,11 @@ enum AdaptiveMixGuidance: String, Codable, Equatable {
 
 enum AdaptiveMixPolicy {
     static let refreshInterval: TimeInterval = 30
+    /// Must stay in sync with WatchAdaptiveMixPolicy.upcomingIntervalLeadTime in the watch target.
     static let upcomingIntervalLeadTime: TimeInterval = 10
     static let queueDepth = 3
+    /// Starting playback tolerates a partial queue; refills top it back up to `queueDepth`.
+    static let minimumStartSongCount = 2
 
     static func goalScore(
         targetIntensity: Intensity,

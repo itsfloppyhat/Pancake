@@ -14,37 +14,18 @@ final class HealthKitManager: ObservableObject {
     // MARK: - HealthKit Types
     private let readTypes: Set<HKObjectType>
     private let shareTypes: Set<HKSampleType>
+    private let authorizationRequestCompletedKey = "HealthKitManager.authorizationRequestCompleted"
 
     private init() {
-        // Define the types we want to read and write
         var readTypes = Set<HKObjectType>()
-        var shareTypes = Set<HKSampleType>()
 
-        // Workout data
+        // The iPhone target imports running history only. Workout creation is owned by the watch app.
         let workoutType = HKObjectType.workoutType()
-        shareTypes.insert(workoutType)
-        
-        // Distance data
-        if let distanceType = HKObjectType.quantityType(forIdentifier: .distanceWalkingRunning) {
-            readTypes.insert(distanceType)
-            shareTypes.insert(distanceType)
-        }
-        
-        // Heart rate data
-        if let heartRateType = HKObjectType.quantityType(forIdentifier: .heartRate) {
-            readTypes.insert(heartRateType)
-        }
-        
-        // Active energy data
-        if let activeEnergyType = HKObjectType.quantityType(forIdentifier: .activeEnergyBurned) {
-            readTypes.insert(activeEnergyType)
-            shareTypes.insert(activeEnergyType)
-        }
+        readTypes.insert(workoutType)
         
         self.readTypes = readTypes
-        self.shareTypes = shareTypes
+        self.shareTypes = []
         
-        // Proactively check authorization status on init
         Task { [weak self] in
             await self?.refreshAuthorizationState()
         }
@@ -60,6 +41,9 @@ final class HealthKitManager: ObservableObject {
 
         healthStore.requestAuthorization(toShare: shareTypes, read: readTypes) { [weak self] success, error in
             Task { @MainActor in
+                if success, let key = self?.authorizationRequestCompletedKey {
+                    UserDefaults.standard.set(true, forKey: key)
+                }
                 self?.updateAuthorizationState(requestSucceeded: success)
                 if let error = error {
                     self?.lastAuthorizationError = error
@@ -82,6 +66,20 @@ final class HealthKitManager: ObservableObject {
     // MARK: - Authorization Helpers
 
     private func updateAuthorizationState(requestSucceeded: Bool? = nil) {
+        if shareTypes.isEmpty {
+            isAuthorized = UserDefaults.standard.bool(forKey: authorizationRequestCompletedKey)
+            missingRequiredShareTypeNames = []
+
+            if isAuthorized {
+                lastAuthorizationError = nil
+            } else if requestSucceeded == false {
+                lastAuthorizationError = HealthKitError.requestFailed
+            } else {
+                lastAuthorizationError = HealthKitError.notAuthorized
+            }
+            return
+        }
+
         missingRequiredShareTypeNames = missingRequiredShareTypes().map(displayName(for:)).sorted()
         isAuthorized = missingRequiredShareTypeNames.isEmpty
 
@@ -244,11 +242,11 @@ enum HealthKitError: LocalizedError {
         case .notAvailable:
             return "Health data is not available on this device"
         case .notAuthorized:
-            return "HealthKit authorization is required"
+            return "Health access is needed before importing running history"
         case .missingRequiredShareTypes(let names):
-            return "HealthKit needs write access for: \(names.joined(separator: ", "))"
+            return "Health needs write access for: \(names.joined(separator: ", "))"
         case .requestFailed:
-            return "Failed to request HealthKit authorization"
+            return "Failed to request Health access"
         }
     }
 }
