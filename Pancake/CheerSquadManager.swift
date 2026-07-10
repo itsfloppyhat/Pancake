@@ -376,6 +376,11 @@ final class CheerSquadManager: ObservableObject {
 
     /// Called by the workout coordinator when a run starts.
     func workoutDidStart() {
+        #if DEBUG
+        // Sandbox runs must never notify real squad members.
+        if RunSandboxDriver.isSandboxRunActive { return }
+        #endif
+
         runStartedAt = Date()
         seenCheerRecordNames = []
         recentCheers = []

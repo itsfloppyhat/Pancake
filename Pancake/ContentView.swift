@@ -10,6 +10,9 @@ import Charts
 
 struct ContentView: View {
     @StateObject private var onboarding = OnboardingManager.shared
+    #if DEBUG
+    @State private var showingRunSandboxFromLaunch = false
+    #endif
 
     var body: some View {
         Group {
@@ -19,6 +22,16 @@ struct ContentView: View {
                 MainAppView()
             }
         }
+        #if DEBUG
+        .sheet(isPresented: $showingRunSandboxFromLaunch) {
+            RunSandboxView()
+        }
+        .task {
+            if ProcessInfo.processInfo.arguments.contains("--pancake-run-sandbox") {
+                showingRunSandboxFromLaunch = true
+            }
+        }
+        #endif
     }
 }
 

@@ -124,13 +124,18 @@ private enum DebugSimulatorRunOrchestrator {
     }
 
     private static func simulatedRunSegments() -> [RunSegment] {
-        [
-            RunSegment(intensity: .zone2, target: .time(seconds: 20)),
-            RunSegment(intensity: .zone3, target: .time(seconds: 20)),
-            RunSegment(intensity: .zone4, target: .time(seconds: 25)),
-            RunSegment(intensity: .zone2, target: .time(seconds: 20)),
-            RunSegment(intensity: .zone5, target: .time(seconds: 15)),
-            RunSegment(intensity: .zone1, target: .time(seconds: 15))
+        // Scale stretches every segment (e.g. 12 → 20s becomes 4 min) so
+        // screenshot runs show realistic countdowns; the validation loop
+        // keeps the fast defaults by not setting the variable.
+        let scale = ProcessInfo.processInfo.environment["PANCAKE_SIM_SEGMENT_SCALE"].flatMap(Int.init) ?? 1
+
+        return [
+            RunSegment(intensity: .zone2, target: .time(seconds: 20 * scale)),
+            RunSegment(intensity: .zone3, target: .time(seconds: 20 * scale)),
+            RunSegment(intensity: .zone4, target: .time(seconds: 25 * scale)),
+            RunSegment(intensity: .zone2, target: .time(seconds: 20 * scale)),
+            RunSegment(intensity: .zone5, target: .time(seconds: 15 * scale)),
+            RunSegment(intensity: .zone1, target: .time(seconds: 15 * scale))
         ]
     }
 

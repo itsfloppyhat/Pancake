@@ -6,6 +6,9 @@ struct UserProfileView: View {
     @StateObject private var onboarding = OnboardingManager.shared
     @State private var showingResetProfileAlert = false
     @State private var showingCheerSquad = false
+    #if DEBUG
+    @State private var showingRunSandbox = false
+    #endif
     
     var body: some View {
         NavigationView {
@@ -82,6 +85,17 @@ struct UserProfileView: View {
                             showingCheerSquad = true
                         }
 
+                        #if DEBUG
+                        SettingsSectionView(
+                            title: "Run Sandbox",
+                            subtitle: "Drive a fake run with live HR and speed (debug only)",
+                            icon: "wrench.and.screwdriver",
+                            color: .pastelLavender
+                        ) {
+                            showingRunSandbox = true
+                        }
+                        #endif
+
                         SettingsSectionView(
                             title: "Privacy Policy",
                             subtitle: "How Pancake handles Health, location, and music data",
@@ -136,6 +150,11 @@ struct UserProfileView: View {
             .sheet(isPresented: $showingCheerSquad) {
                 CheerSquadView()
             }
+            #if DEBUG
+            .sheet(isPresented: $showingRunSandbox) {
+                RunSandboxView()
+            }
+            #endif
             .alert("Reset Profile Data", isPresented: $showingResetProfileAlert) {
                 Button("Cancel", role: .cancel) { }
                 Button("Reset", role: .destructive) {

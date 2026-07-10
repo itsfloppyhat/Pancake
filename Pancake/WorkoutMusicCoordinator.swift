@@ -463,6 +463,16 @@ final class WorkoutMusicCoordinator: ObservableObject {
             stopAdaptiveMixRefreshTimer()
         }
 
+        #if DEBUG
+        AdaptiveMixEvalRecorder.shared.recordCuration(
+            trigger: trigger.rawValue,
+            goalScore: goalScore,
+            resolvedSongs: resolvedItems.map(\.song),
+            applied: didApplyQueue,
+            preferences: profileManager.userProfile.musicPreferences
+        )
+        #endif
+
         isAdaptiveMixCurating = false
         sendAdaptiveMixStateToWatch()
 
@@ -530,6 +540,11 @@ final class WorkoutMusicCoordinator: ObservableObject {
         guard isWorkoutActive,
               isAdaptiveMixActive,
               musicManager.isAdaptivePlaybackActive,
+              // While a curation is replacing the queue, the entry count dips
+              // transiently; reacting to those dips chain-fires refills every
+              // few seconds on device. Real advances are re-checked when the
+              // in-flight curation publishes its final queue.
+              !isAdaptiveMixCurating,
               upcomingSongs.count < AdaptiveMixPolicy.queueDepth,
               let context = currentWorkoutContext else {
             return

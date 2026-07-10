@@ -73,7 +73,7 @@ struct GenerableMusicSuggestion {
 
 @Generable
 struct GenerableAdaptiveMix {
-    @Guide(description: "Exactly three distinct real, commercially released songs for the next adaptive running queue. Do not repeat a song.", .count(3))
+    @Guide(description: "Exactly five distinct real, commercially released candidate songs for the next adaptive running queue. Do not repeat a song or pair a real title with the wrong artist.", .count(5))
     let suggestions: [GenerableMusicSuggestion]
 }
 
@@ -395,18 +395,25 @@ final class MusicAIService: ObservableObject {
             preferences: userPreferences,
             preferLibrarySelection: false,
             mustUseLibrary: false,
-            avoidedSongs: avoidedSongs
+            avoidedSongs: avoidedSongs,
+            isAdaptiveMixBatch: true
         )
         let prompt = """
         \(basePrompt)
 
         ADAPTIVE MIX QUEUE:
-        - Return exactly three distinct next-song options.
-        - These songs will be queued behind the currently playing song.
-        - Do not pick a song for an exact timestamp. The runner may press Next, or normal playback may advance when the current song finishes.
+        - Return exactly five distinct candidate songs for the next adaptive running queue.
+        - These songs will be queued behind the currently playing song. Do not pick a song for an exact timestamp. The runner may press Next, or normal playback may advance when the current song finishes.
         - Goal alignment score: \(goalScore.alignmentScore)/100.
         - Guidance: \(goalScore.guidance.promptDescription)
+        - ALLOCATION: exactly two of the five songs must be by artists from the runner's taste profile (favorite artists, favorite songs, or imported playlist artists), and both must genuinely fit the target heart-rate zone and guidance — never more than two, and fewer only if no profile artist fits the zone. The other three must be real songs by related artists outside the taste profile.
+        - Rotate through different profile artists across queues; skip profile artists already in the songs-to-avoid list. A favorite artist whose song fits the zone beats a favorite song that fights the zone.
+        - Order the five candidates exactly: exploration, taste-profile, exploration, taste-profile, exploration.
         """
+
+        #if DEBUG
+        AdaptiveMixEvalRecorder.shared.willGenerate(prompt: prompt)
+        #endif
 
         do {
             let response = try await withRequestTimeout {
@@ -419,6 +426,10 @@ final class MusicAIService: ObservableObject {
                 .map(mapToMusicSuggestion)
                 .map { $0.cleanedTitle() }
                 .filter { uniqueKeys.insert($0.sessionSongKey).inserted }
+
+            #if DEBUG
+            AdaptiveMixEvalRecorder.shared.didGenerate(suggestions)
+            #endif
 
             return suggestions
         } catch {
@@ -947,14 +958,16 @@ final class MusicAIService: ObservableObject {
         preferences: MusicPreferences,
         preferLibrarySelection: Bool = false,
         mustUseLibrary: Bool = false,
-        avoidedSongs: [MusicSong] = []
+        avoidedSongs: [MusicSong] = [],
+        isAdaptiveMixBatch: Bool = false
     ) -> String {
         makeMusicSuggestionPromptPreview(
             context: context,
             preferences: preferences,
             preferLibrarySelection: preferLibrarySelection,
             mustUseLibrary: mustUseLibrary,
-            avoidedSongs: avoidedSongs
+            avoidedSongs: avoidedSongs,
+            isAdaptiveMixBatch: isAdaptiveMixBatch
         ).fullPrompt
     }
 
@@ -963,7 +976,8 @@ final class MusicAIService: ObservableObject {
         preferences: MusicPreferences,
         preferLibrarySelection: Bool = false,
         mustUseLibrary: Bool = false,
-        avoidedSongs: [MusicSong] = []
+        avoidedSongs: [MusicSong] = [],
+        isAdaptiveMixBatch: Bool = false
     ) -> MusicPromptPreview {
         let tasteProfile = MusicTasteProfileBuilder.build(from: preferences)
         let zoneReference = buildHeartRateZoneReference()
@@ -989,7 +1003,11 @@ final class MusicAIService: ObservableObject {
             ""
         }
 
-        let discoveryGuidance = buildDiscoveryBalanceGuidance()
+        // The adaptive-mix batch prompt carries its own explicit favorites
+        // allocation; the soft exploration-balance and escalation clauses
+        // contradict it and reliably win on the small on-device model, which
+        // starved favorites to near zero in live testing.
+        let discoveryGuidance = isAdaptiveMixBatch ? "" : buildDiscoveryBalanceGuidance()
 
         let libraryInstruction = if mustUseLibrary {
             """
@@ -1018,7 +1036,9 @@ final class MusicAIService: ObservableObject {
         let energyFitGuidance = buildIntensityEnergyFitGuidance(for: context.currentIntensity)
 
         // Build variety guidance
-        let varietyGuidance = buildVarietyGuidance(avoiding: avoidedSongs)
+        let varietyGuidance = isAdaptiveMixBatch
+            ? buildAdaptiveAvoidListGuidance(avoiding: avoidedSongs)
+            : buildVarietyGuidance(avoiding: avoidedSongs)
 
         let recentSongsText = context.recentSongs.isEmpty
             ? "None yet"
@@ -1397,6 +1417,21 @@ final class MusicAIService: ObservableObject {
         """
 
         TASTE / EXPLORATION BALANCE: Use favorite artists and favorite songs as taste anchors, not a queue. Across repeated recommendations, exact favorite artists or exact favorite songs should be about 40% of picks; about 60% should explore real related artists or adjacent songs that fit the same taste family. Only choose an exact favorite when it is also one of the best heart-rate-zone fits available. A related artist with better zone fit beats a weaker favorite. If the recent-song avoid list already includes exact favorites or obvious favorite artists, treat the 40% favorite quota as satisfied for this turn and default to a real related artist outside the explicit Favorite Artists list when source constraints allow. Do not rationalize a favorite ballad, slow crescendo, dramatic vocal showcase, workout anthem, or low-groove song as a fit just because the artist appears in the taste profile.
+        """
+    }
+
+    /// Adaptive-mix batches get a plain avoid list. Session-discovery and
+    /// escalation clauses live in `buildVarietyGuidance` for single-song
+    /// requests only, because they conflict with the batch allocation rule.
+    private func buildAdaptiveAvoidListGuidance(avoiding avoidedSongs: [MusicSong]) -> String {
+        guard !avoidedSongs.isEmpty else { return "" }
+
+        let avoidList = avoidedSongs.map { "\($0.artist) - \($0.title)" }.joined(separator: ", ")
+
+        return """
+
+        SONGS TO AVOID FOR THIS QUEUE: \(avoidList).
+        Do not repeat any of these songs, and do not include two songs by the same artist in one batch.
         """
     }
 

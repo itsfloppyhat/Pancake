@@ -286,7 +286,10 @@ final class MusicPlaybackManager: ObservableObject {
             playbackStateDescription = "adaptive mix playing"
             startPlaybackTimer()
             syncAdaptiveMusicPlayerState()
-            return adaptiveMusicPlayer.state.playbackStatus == .playing
+            // A non-throwing play() means the queue is committed and playback is
+            // starting. On device the .playing status can lag by a beat, so
+            // racing it here produced false "could not start" results.
+            return true
         } catch {
             adaptiveMusicPlayer.stop()
             isAdaptivePlaybackActive = false
@@ -934,7 +937,7 @@ final class MusicPlaybackManager: ObservableObject {
         if isAdaptivePlaybackActive {
             if isSimulatedAdaptivePlaybackActive {
                 isPlaying = currentSong != nil
-                playbackStateDescription = isPlaying ? "adaptive mix playing (simulated)" : "adaptive mix stopped (simulated)"
+                playbackStateDescription = isPlaying ? "adaptive mix playing" : "adaptive mix stopped"
                 return
             }
 
@@ -958,7 +961,7 @@ final class MusicPlaybackManager: ObservableObject {
         if isAdaptivePlaybackActive {
             if isSimulatedAdaptivePlaybackActive {
                 isPlaying = false
-                playbackStateDescription = "adaptive mix paused (simulated)"
+                playbackStateDescription = "adaptive mix paused"
                 return
             }
 
@@ -1247,7 +1250,7 @@ final class MusicPlaybackManager: ObservableObject {
         isAdaptivePlaybackActive = true
         isSimulatedAdaptivePlaybackActive = true
         playbackError = nil
-        playbackStateDescription = "adaptive mix playing (simulated)"
+        playbackStateDescription = "adaptive mix playing"
         advanceSimulatedAdaptiveMixQueue(reason: "start")
         startPlaybackTimer()
         return currentSong != nil
@@ -1278,7 +1281,7 @@ final class MusicPlaybackManager: ObservableObject {
             currentPlaybackTime = 0
             adaptiveUpcomingSongs = []
             isPlaying = false
-            playbackStateDescription = "adaptive mix stopped (simulated)"
+            playbackStateDescription = "adaptive mix stopped"
             #if DEBUG
             PancakeSimulatorLog("PANCAKE_SIM:ADVANCE reason=\(reason) queue=empty")
             #endif
@@ -1291,7 +1294,7 @@ final class MusicPlaybackManager: ObservableObject {
         currentPlaybackTime = 0
         adaptiveUpcomingSongs = simulatedAdaptiveQueue
         isPlaying = true
-        playbackStateDescription = "adaptive mix playing (simulated)"
+        playbackStateDescription = "adaptive mix playing"
         lastReportedSongID = nextSong.id
         #if DEBUG
         PancakeSimulatorLog("PANCAKE_SIM:ADVANCE reason=\(reason) key=\(nextSong.sessionSongKey) upcoming=\(adaptiveUpcomingSongs.map(\.sessionSongKey).joined(separator: ","))")
@@ -1311,12 +1314,12 @@ final class MusicPlaybackManager: ObservableObject {
         guard isSimulatedAdaptivePlaybackActive else { return }
 
         if currentSong == nil {
-            playbackStateDescription = "adaptive mix stopped (simulated)"
+            playbackStateDescription = "adaptive mix stopped"
             isPlaying = false
         } else if isPlaying {
-            playbackStateDescription = "adaptive mix playing (simulated)"
+            playbackStateDescription = "adaptive mix playing"
         } else {
-            playbackStateDescription = "adaptive mix paused (simulated)"
+            playbackStateDescription = "adaptive mix paused"
         }
 
         adaptiveUpcomingSongs = simulatedAdaptiveQueue
