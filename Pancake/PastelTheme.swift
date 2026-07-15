@@ -1,8 +1,30 @@
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#elseif canImport(AppKit)
+import AppKit
+#endif
 
 // MARK: - Pastel Color Palette
 
 extension Color {
+    /// Resolves to `light` in light appearance and `dark` in dark appearance.
+    /// Used so the hand-picked pastel surfaces adapt instead of staying frozen
+    /// at their light values (which left dark mode as a light page with black cards).
+    static func adaptive(light: Color, dark: Color) -> Color {
+#if canImport(UIKit)
+        Color(UIColor { traitCollection in
+            traitCollection.userInterfaceStyle == .dark ? UIColor(dark) : UIColor(light)
+        })
+#elseif canImport(AppKit)
+        Color(NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? NSColor(dark) : NSColor(light)
+        })
+#else
+        light
+#endif
+    }
+
     // Primary pastel colors
     static let pastelLavender = Color(red: 0.71, green: 0.64, blue: 0.95)      // Soft purple
     static let pastelPeriwinkle = Color(red: 0.62, green: 0.68, blue: 0.97)    // Blue-purple
@@ -14,9 +36,21 @@ extension Color {
     static let pastelLemon = Color(red: 0.98, green: 0.92, blue: 0.60)         // Soft yellow
     static let pastelLilac = Color(red: 0.82, green: 0.72, blue: 0.96)         // Light purple
 
-    // Card and background tints
-    static let pastelCardBackground = Color(red: 0.96, green: 0.95, blue: 1.0) // Very light lavender
-    static let pastelGroupedBackground = Color(red: 0.97, green: 0.96, blue: 1.0)
+    // Card and background tints — adaptive so dark mode reads as intentional.
+    static let pastelCardBackground = Color.adaptive(
+        light: Color(red: 0.96, green: 0.95, blue: 1.0),   // Very light lavender
+        dark: Color(red: 0.13, green: 0.13, blue: 0.17)    // Muted dark surface
+    )
+    static let pastelGroupedBackground = Color.adaptive(
+        light: Color(red: 0.97, green: 0.96, blue: 1.0),   // Light lavender page
+        dark: Color(red: 0.07, green: 0.07, blue: 0.10)    // Near-black page
+    )
+    /// Elevated card fill used by `bubblyCard()`; sits a step above the grouped
+    /// background in both appearances so cards keep their lift in dark mode.
+    static let pastelElevatedBackground = Color.adaptive(
+        light: .white,
+        dark: Color(red: 0.15, green: 0.15, blue: 0.19)
+    )
     static var pancakeSystemBackground: Color {
 #if os(macOS)
         Color(nsColor: .windowBackgroundColor)
@@ -139,7 +173,7 @@ struct BubblyCardModifier: ViewModifier {
             .padding(padding)
             .background(
                 RoundedRectangle(cornerRadius: 20, style: .continuous)
-                    .fill(Color.pancakeSystemBackground)
+                    .fill(Color.pastelElevatedBackground)
                     .shadow(color: Color.pastelLavender.opacity(0.18), radius: 8, x: 0, y: 4)
             )
     }

@@ -83,7 +83,8 @@ struct OnboardingView: View {
                     title: "Health history import",
                     subtitle: "Optional. Read completed runs from Health into your iPhone history.",
                     icon: "heart.fill",
-                    isComplete: onboarding.healthReady
+                    isComplete: onboarding.healthReady,
+                    actionTitle: "Allow"
                 ) {
                     onboarding.requestHealthAuthorization()
                 }
@@ -100,7 +101,8 @@ struct OnboardingView: View {
                     title: "Apple Music playback",
                     subtitle: "Optional. Play requested suggestions or start an Adaptive Mix during a run.",
                     icon: "play.circle.fill",
-                    isComplete: onboarding.catalogReady
+                    isComplete: onboarding.catalogReady,
+                    actionTitle: "Connect"
                 ) {
                     Task {
                         await onboarding.requestCatalogAuthorization()
@@ -111,7 +113,8 @@ struct OnboardingView: View {
                     title: "Library taste import",
                     subtitle: "Optional. Learn artists, songs, genres, and playlists you already like.",
                     icon: "music.note.list",
-                    isComplete: onboarding.libraryReady
+                    isComplete: onboarding.libraryReady,
+                    actionTitle: "Allow"
                 ) {
                     onboarding.requestLibraryAuthorization()
                 }
@@ -276,6 +279,9 @@ private struct OnboardingPermissionRow: View {
     let subtitle: String
     let icon: String
     let isComplete: Bool
+    /// Verb describing what the row's button does (e.g. "Allow", "Connect"),
+    /// kept distinct from the step's "Continue" navigation button.
+    let actionTitle: String
     let action: () -> Void
 
     var body: some View {
@@ -300,7 +306,7 @@ private struct OnboardingPermissionRow: View {
                 Image(systemName: "checkmark.circle.fill")
                     .foregroundColor(.pastelMint)
             } else {
-                Button("Continue", action: action)
+                Button(actionTitle, action: action)
                     .buttonStyle(BubblySmallButtonStyle(backgroundColor: .pastelPeriwinkle))
             }
         }
