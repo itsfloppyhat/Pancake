@@ -26,6 +26,37 @@ struct JoinedSquad: Identifiable, Equatable {
     let zoneID: CKRecordZone.ID
     var isRunningNow: Bool
     var runStartedAt: Date?
+    var runID: String? = nil
+    var runAlertsEnabled = false
+}
+
+/// The latest desired status is kept across launches so an offline finish can
+/// be retried without recreating a run or announcing it twice.
+struct CheerRunBroadcast: Codable, Equatable {
+    let id: String
+    let startedAt: Date
+    var isRunning: Bool
+    let alertsEnabled: Bool
+}
+
+enum CheerRunAlertPolicy {
+    static let maximumAlertDelay: TimeInterval = 15 * 60
+
+    /// Called only after a fresh, authorized read of the shared run status.
+    static func shouldNotify(
+        runID: String?,
+        startedAt: Date?,
+        isRunning: Bool,
+        alertsEnabled: Bool,
+        lastNotifiedRunID: String?,
+        now: Date = Date()
+    ) -> Bool {
+        guard isRunning, alertsEnabled,
+              let runID, !runID.isEmpty, runID != lastNotifiedRunID,
+              let startedAt else { return false }
+        let age = now.timeIntervalSince(startedAt)
+        return age >= 0 && age <= maximumAlertDelay
+    }
 }
 
 /// A cheer message received during (or after) a run.
@@ -53,6 +84,8 @@ enum CheerSquadSchema {
     static let runStatusRecordName = "run-status"
     static let statusField = "status"
     static let startedAtField = "startedAt"
+    static let runIDField = "runID"
+    static let alertsEnabledField = "alertsEnabled"
     static let statusRunning = "running"
     static let statusEnded = "ended"
 
@@ -61,8 +94,8 @@ enum CheerSquadSchema {
     static let senderNameField = "senderName"
     static let sentAtField = "sentAt"
 
-    /// Public-database record announcing a run start. Contains only an opaque
-    /// squad UUID and a display name; deleted when the run ends.
+    /// Legacy public records are read only for deletion during migration.
+    /// Current run alerts use authorized reads in the shared database.
     static let announcementRecordType = "RunAnnouncement"
     static let announcementSquadIDField = "squadID"
     static let announcementRunnerNameField = "runnerName"

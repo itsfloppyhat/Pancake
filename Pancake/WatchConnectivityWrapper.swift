@@ -22,40 +22,40 @@ final class WatchConnectivityWrapper: NSObject, ObservableObject {
         }
     }
     
-    func sendRunPlan(_ segments: [RunSegment]) {
-        guard WCSession.isSupported() else {
-            lastError = WatchConnectivityError.notSupported
-            return
-        }
-        
-        guard WCSession.default.isPaired else {
-            lastError = WatchConnectivityError.watchNotPaired
-            return
-        }
-        
-        guard WCSession.default.isWatchAppInstalled else {
-            lastError = WatchConnectivityError.watchAppNotInstalled
-            return
-        }
-        
-        do {
-            let segmentsData = try JSONEncoder().encode(segments)
-            let message = [
-                "type": WatchMessageType.runPlan.rawValue,
-                "segments": segmentsData
-            ] as [String : Any]
-            
-            // Use fallback method for run plans - critical messages that need to be delivered
-            sendMessageWithFallback(message) { error in
-                DispatchQueue.main.async {
-                    self.lastError = error
-                }
+    /// Store the plan durably before asking HealthKit to wake the Watch app.
+    /// Activation is asynchronous at launch, so never silently drop the first send.
+    @MainActor
+    func sendRunPlan(_ segments: [RunSegment]) async throws {
+        guard WCSession.isSupported() else { throw WatchConnectivityError.notSupported }
+        let session = WCSession.default
+        if session.activationState != .activated {
+            session.activate()
+            for _ in 0..<50 {
+                if session.activationState == .activated { break }
+                try await Task.sleep(for: .milliseconds(100))
             }
-        } catch {
-            lastError = error
+        }
+        guard session.activationState == .activated else { throw WatchConnectivityError.sessionNotReady }
+        guard session.isPaired else { throw WatchConnectivityError.watchNotPaired }
+        guard session.isWatchAppInstalled else { throw WatchConnectivityError.watchAppNotInstalled }
+
+        let message: [String: Any] = [
+            "type": WatchMessageType.runPlan.rawValue,
+            "segments": try JSONEncoder().encode(segments),
+            "planID": UUID().uuidString,
+            "sentAt": Date().timeIntervalSince1970
+        ]
+        try session.updateApplicationContext(message)
+        if session.isReachable {
+            session.sendMessage(message, replyHandler: nil) { _ in
+                // Reachability can change between the check and actual delivery.
+                session.transferUserInfo(message)
+            }
+        } else {
+            session.transferUserInfo(message)
         }
     }
-    
+
     func requestStartRun() {
         guard WCSession.isSupported() else {
             lastError = WatchConnectivityError.notSupported
@@ -154,6 +154,7 @@ extension WatchConnectivityWrapper: WCSessionDelegate {
     }
 
     func sessionDidDeactivate(_ session: WCSession) {
+        session.activate()
         DispatchQueue.main.async {
             self.isWatchReachable = false
         }
@@ -180,6 +181,18 @@ extension WatchConnectivityWrapper: WCSessionDelegate {
     }
 
     func session(_ session: WCSession, didReceiveMessage message: [String : Any], replyHandler: @escaping ([String : Any]) -> Void) {
+        let type = message["type"] as? String
+        if message["runID"] != nil,
+           type == "musicControl" || type == WatchMessageType.playbackControl.rawValue {
+            Task { @MainActor in
+                if let error = WorkoutMusicCoordinator.shared.handleIntervalMusicControl(message) {
+                    replyHandler(["status": "rejected", "error": error])
+                } else {
+                    replyHandler(["status": "success"])
+                }
+            }
+            return
+        }
         DispatchQueue.main.async {
             self.handleWatchMessage(message)
             replyHandler(["status": "success"])
@@ -236,8 +249,9 @@ final class WatchConnectivityWrapper: ObservableObject {
     
     private init() {}
 
-    func sendRunPlan(_ segments: [RunSegment]) {
-        lastError = WatchConnectivityError.notSupported
+    @MainActor
+    func sendRunPlan(_ segments: [RunSegment]) async throws {
+        throw WatchConnectivityError.notSupported
     }
 
     func requestStartRun() {

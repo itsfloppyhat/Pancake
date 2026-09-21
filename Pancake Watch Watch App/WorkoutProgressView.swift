@@ -1,29 +1,12 @@
 import SwiftUI
 import WatchKit
 
-/// Totals captured at the moment the workout ends, shown on the summary screen
-/// after the session manager has already reset its live state.
-struct WorkoutSummary {
-    let totalSeconds: Int
-    let totalDistanceKm: Double
-    let activeCalories: Double
-    let segmentCount: Int
-
-    var formattedPace: String? {
-        guard totalDistanceKm > 0 else { return nil }
-        let paceSeconds = Double(totalSeconds) / totalDistanceKm
-        let minutes = Int(paceSeconds) / 60
-        let seconds = Int(paceSeconds) % 60
-        return String(format: "%d:%02d/km", minutes, seconds)
-    }
-}
-
 struct WorkoutProgressView: View {
     @ObservedObject var manager: WorkoutSessionManager
     @ObservedObject private var watchConnectivity = WatchConnectivityManager.shared
+    @ObservedObject private var intervalNotifications = IntervalNotificationManager.shared
     @State private var selectedPage = 1
     @State private var showingEndConfirmation = false
-    @State private var completedSummary: WorkoutSummary?
     @State private var visibleCheer: ReceivedCheer?
     @State private var cheerDismissTask: Task<Void, Never>?
 
@@ -32,14 +15,17 @@ struct WorkoutProgressView: View {
 
     var body: some View {
         Group {
-            if let summary = completedSummary {
+            if let summary = manager.completedSummary {
                 WorkoutSummaryView(summary: summary) {
-                    completedSummary = nil
+                    manager.acknowledgeCompletedWorkout()
                     onDismiss?()
                 }
             } else {
                 workoutPages
             }
+        }
+        .sheet(item: $intervalNotifications.currentInterval) { interval in
+            IntervalMusicControlsView(interval: interval)
         }
     }
 
@@ -94,7 +80,7 @@ struct WorkoutProgressView: View {
         .alert("End Workout", isPresented: $showingEndConfirmation) {
             Button("Cancel", role: .cancel) { }
             Button("End Workout", role: .destructive) {
-                endWorkout()
+                manager.stopWorkout()
             }
         } message: {
             Text("Are you sure you want to end this workout?")
@@ -129,44 +115,6 @@ struct WorkoutProgressView: View {
         }
     }
 
-    private func endWorkout() {
-        // Compute totals
-        let totalSeconds: Int
-        if manager.workoutStartDate != nil {
-            totalSeconds = max(0, Int(manager.workoutDuration))
-        } else {
-            totalSeconds = 0
-        }
-
-        let totalDistanceKm = manager.displayedDistanceKm
-        let totalMeters: Int = Int(totalDistanceKm * 1000.0)
-
-        // Use the planned segments from the workout manager
-        let segments = manager.plannedSegments.isEmpty ? [] : manager.plannedSegments
-
-        // Capture the summary before the manager resets its live state.
-        let summary = WorkoutSummary(
-            totalSeconds: totalSeconds,
-            totalDistanceKm: totalDistanceKm,
-            activeCalories: manager.activeCalories,
-            segmentCount: segments.count
-        )
-
-        // Build and save event on Watch
-        let event = RunEvent(totalDistanceMeters: totalMeters, totalTimeSeconds: totalSeconds, segments: segments)
-        RunHistoryStore.shared.add(event: event)
-
-        // Send workout completion to iPhone with final distance/time data
-        // so the iPhone can also save the run event with accurate totals.
-        WatchConnectivityManager.shared.sendWorkoutCompleted(
-            totalDistanceKm: totalDistanceKm,
-            totalTimeSeconds: totalSeconds
-        )
-
-        // Now stop the workout session and show the summary
-        manager.stopWorkout()
-        completedSummary = summary
-    }
 }
 
 // MARK: - Controls Page
@@ -552,9 +500,24 @@ private struct WorkoutSummaryView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
-                Label("Workout Complete", systemImage: "checkmark.circle.fill")
+                Label(summary.interruptionMessage == nil ? "Workout Complete" : "Workout Interrupted", systemImage: summary.interruptionMessage == nil ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
                     .font(.headline)
-                    .foregroundStyle(.green)
+                    .foregroundStyle(summary.interruptionMessage == nil ? .green : .orange)
+
+                if let message = summary.interruptionMessage {
+                    Text(message)
+                        .font(.caption2)
+                }
+
+                Text("Your run is saved in Pancake.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+
+                if let message = summary.healthSaveMessage {
+                    Text(message)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
 
                 SummaryMetricRow(title: "Time", value: summary.totalSeconds.formattedTime())
                 SummaryMetricRow(title: "Distance", value: String(format: "%.2f km", summary.totalDistanceKm))

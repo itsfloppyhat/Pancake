@@ -10,6 +10,14 @@ struct MusicRecommendationPolicyRegression {
             try testTasteProfilePrioritizesManualFavorites()
             try testFallbackSuggestionAvoidsPlayedManualFavorites()
             try testFallbackSuggestionUsesImportedTasteSample()
+            try testFallbackSuggestionsComeOnlyFromSavedTaste()
+            try testPlayedSongIsBlockedForFourRuns()
+            try testRunWithoutMusicDoesNotAgeOutSongHistory()
+            try testPromptAvoidListIsCappedNewestFirst()
+            try testRecoveredRunKeepsWatchTotalsAndSnapshotDetail()
+            try testRecoveredRunSurvivesTotalLossOfLiveState()
+            try testEmptyRunIsNotSaved()
+            try testStaleSnapshotDetection()
             try testNormalizedSongIdentityCollapsesVariants()
             try testAdaptiveMixGoalScoring()
             try testUpcomingIntervalPrecurationWindow()
@@ -120,6 +128,211 @@ struct MusicRecommendationPolicyRegression {
 
         try assertEqual(fallback?.songTitle, "Playlist Gem", "Imported taste samples should provide a fallback when manual favorites are empty.")
         try assertEqual(fallback?.mood, .motivational, "Fallback mood should track workout intensity.")
+    }
+
+    private static func testFallbackSuggestionsComeOnlyFromSavedTaste() throws {
+        let preferences = MusicPreferences(
+            favoriteSongs: [
+                MusicSong(id: "song-1", title: "Saved Favorite", artist: "Runner", duration: 210)
+            ],
+            selectedPlaylist: ImportedPlaylist(id: "playlist-1", name: "Tempo Builder", songCount: 12),
+            importedPlaylistSongs: [
+                MusicSong(id: "song-2", title: "Playlist Gem", artist: "Imported Runner", duration: 190)
+            ]
+        )
+
+        let candidates = MusicRecommendationPolicy.fallbackSuggestions(
+            preferences: preferences,
+            intensity: .zone3
+        )
+
+        try assertEqual(
+            candidates.map(\.songTitle),
+            ["Saved Favorite", "Playlist Gem"],
+            "Fallback candidates should be the runner's own songs, favorites first."
+        )
+        try assertTrue(
+            MusicRecommendationPolicy.fallbackSuggestions(
+                preferences: MusicPreferences(),
+                intensity: .zone3
+            ).isEmpty,
+            "An empty taste profile should yield no fallback candidates rather than a shared hard-coded list."
+        )
+    }
+
+    private static func testPlayedSongIsBlockedForFourRuns() throws {
+        let song = MusicSong(id: "song-1", title: "Good as Hell", artist: "Lizzo", duration: 219)
+
+        // Run 1 plays the song.
+        var runs = CrossRunSongHistoryPolicy.beginningRun(in: [])
+        runs = CrossRunSongHistoryPolicy.recordingPlayedSong(song, in: runs)
+
+        try assertTrue(
+            CrossRunSongHistoryPolicy.avoidedSongKeys(in: runs).contains(song.sessionSongKey),
+            "A song should be blocked for the rest of the run it played in."
+        )
+
+        // Runs 2, 3 and 4 must still block it.
+        for run in 2...4 {
+            runs = CrossRunSongHistoryPolicy.beginningRun(in: runs)
+            try assertTrue(
+                CrossRunSongHistoryPolicy.avoidedSongKeys(in: runs).contains(song.sessionSongKey),
+                "A song played in run 1 should still be blocked in run \(run)."
+            )
+            runs = CrossRunSongHistoryPolicy.recordingPlayedSong(
+                MusicSong(id: "filler-\(run)", title: "Filler \(run)", artist: "Filler Artist", duration: 200),
+                in: runs
+            )
+        }
+
+        // Run 5 ages it out.
+        runs = CrossRunSongHistoryPolicy.beginningRun(in: runs)
+        try assertTrue(
+            !CrossRunSongHistoryPolicy.avoidedSongKeys(in: runs).contains(song.sessionSongKey),
+            "A song played in run 1 should be eligible again on the fifth run."
+        )
+    }
+
+    /// The window advances per run that actually played music. A start that
+    /// played nothing — abandoned, or a run done without music — does not
+    /// consume a slot, because it does nothing to make an old song feel fresh.
+    private static func testRunWithoutMusicDoesNotAgeOutSongHistory() throws {
+        let song = MusicSong(id: "song-1", title: "Good as Hell", artist: "Lizzo", duration: 219)
+
+        var runs = CrossRunSongHistoryPolicy.beginningRun(in: [])
+        runs = CrossRunSongHistoryPolicy.recordingPlayedSong(song, in: runs)
+
+        // Three starts that never played anything should collapse into one slot.
+        for _ in 0..<3 {
+            runs = CrossRunSongHistoryPolicy.beginningRun(in: runs)
+        }
+
+        try assertEqual(runs.count, 2, "Runs that played no songs should not each consume a history slot.")
+        try assertTrue(
+            CrossRunSongHistoryPolicy.avoidedSongKeys(in: runs).contains(song.sessionSongKey),
+            "A music-free start should not age real history out of the window early."
+        )
+    }
+
+    private static func testPromptAvoidListIsCappedNewestFirst() throws {
+        var runs = CrossRunSongHistoryPolicy.beginningRun(in: [])
+
+        for index in 0..<20 {
+            runs = CrossRunSongHistoryPolicy.recordingPlayedSong(
+                MusicSong(id: "song-\(index)", title: "Track \(index)", artist: "Runner \(index)", duration: 200),
+                in: runs
+            )
+        }
+
+        let promptSongs = CrossRunSongHistoryPolicy.recentAvoidedSongs(in: runs)
+
+        try assertEqual(
+            promptSongs.count,
+            CrossRunSongHistoryPolicy.promptAvoidListLimit,
+            "The prompt avoid list should stay capped so it cannot crowd out the rest of the prompt."
+        )
+        try assertEqual(promptSongs.first?.title, "Track 19", "The prompt avoid list should be newest first.")
+        try assertEqual(
+            CrossRunSongHistoryPolicy.avoidedSongKeys(in: runs).count,
+            20,
+            "Key-level blocking should still cover every song in the window, beyond the prompt cap."
+        )
+    }
+
+    private static func makeSnapshot(startedAt: Date = Date()) -> ActiveRunSnapshot {
+        ActiveRunSnapshot(
+            startedAt: startedAt,
+            segments: [RunSegment(intensity: .zone3, target: .time(seconds: 600))],
+            currentSegmentIndex: 0,
+            totalDistanceKm: 4.0,
+            totalTimeSeconds: 1500,
+            dataPoints: [
+                WorkoutDataPoint(
+                    timestamp: 5,
+                    heartRate: 148,
+                    cadence: nil,
+                    distanceMeters: 20,
+                    paceSecondsPerKm: nil,
+                    currentSongTitle: "Track",
+                    currentSongArtist: "Artist"
+                )
+            ],
+            songHistory: [
+                SongPeriod(songTitle: "Track", artist: "Artist", startTimestamp: 0, endTimestamp: 200)
+            ]
+        )
+    }
+
+    /// The watch's final totals arrive with the completion message and must win,
+    /// while everything the killed process lost comes back from the snapshot.
+    private static func testRecoveredRunKeepsWatchTotalsAndSnapshotDetail() throws {
+        let snapshot = makeSnapshot()
+
+        let resolution = RunEventRecoveryPolicy.resolve(
+            liveSegments: snapshot.segments,
+            liveTotalDistanceKm: 5.25,
+            liveTotalTimeSeconds: 1800,
+            liveDataPoints: [],
+            liveSongHistory: [],
+            snapshot: snapshot
+        )
+
+        try assertEqual(resolution.totalDistanceMeters, 5250, "Live watch distance should win over the snapshot's last mirror.")
+        try assertEqual(resolution.totalTimeSeconds, 1800, "Live watch time should win over the snapshot's last mirror.")
+        try assertEqual(resolution.dataPoints.count, 1, "Data points lost with the killed process should come back from the snapshot.")
+        try assertEqual(resolution.songHistory.count, 1, "Song history lost with the killed process should come back from the snapshot.")
+        try assertEqual(resolution.date, snapshot.startedAt, "A recovered run should be dated when it happened, not when it was saved.")
+        try assertTrue(resolution.isSavable, "A run with real distance and time should be savable.")
+    }
+
+    /// The case that was silently dropping runs: completion arrives after the
+    /// app was killed, so there is no live context at all.
+    private static func testRecoveredRunSurvivesTotalLossOfLiveState() throws {
+        let snapshot = makeSnapshot()
+
+        let resolution = RunEventRecoveryPolicy.resolve(
+            liveSegments: nil,
+            liveTotalDistanceKm: nil,
+            liveTotalTimeSeconds: nil,
+            liveDataPoints: [],
+            liveSongHistory: [],
+            snapshot: snapshot
+        )
+
+        try assertTrue(resolution.isSavable, "A run recovered entirely from its snapshot must still be saved.")
+        try assertEqual(resolution.totalDistanceMeters, 4000, "Snapshot distance should be used when no live context survived.")
+        try assertEqual(resolution.totalTimeSeconds, 1500, "Snapshot time should be used when no live context survived.")
+        try assertEqual(resolution.segments.count, 1, "Snapshot segments should be used when no live context survived.")
+    }
+
+    private static func testEmptyRunIsNotSaved() throws {
+        let resolution = RunEventRecoveryPolicy.resolve(
+            liveSegments: nil,
+            liveTotalDistanceKm: nil,
+            liveTotalTimeSeconds: nil,
+            liveDataPoints: [],
+            liveSongHistory: [],
+            snapshot: nil
+        )
+
+        try assertTrue(!resolution.isSavable, "A run with no distance and no time should not reach history.")
+    }
+
+    private static func testStaleSnapshotDetection() throws {
+        let startedAt = Date()
+        let snapshot = makeSnapshot(startedAt: startedAt)
+
+        try assertTrue(
+            !RunEventRecoveryPolicy.isStale(snapshot, now: startedAt.addingTimeInterval(60 * 60)),
+            "A run from an hour ago may still get its completion message."
+        )
+        try assertTrue(
+            RunEventRecoveryPolicy.isStale(
+                snapshot,
+                now: startedAt.addingTimeInterval(RunEventRecoveryPolicy.staleRunInterval + 1)
+            ),
+            "A run old enough that no completion is coming should be flushed to history."
+        )
     }
 
     private static func testNormalizedSongIdentityCollapsesVariants() throws {

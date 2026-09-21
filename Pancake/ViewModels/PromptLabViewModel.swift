@@ -626,8 +626,14 @@ final class PromptLabViewModel: ObservableObject {
             preferredIntensities = [goalScore.targetIntensity] + Intensity.allCases
         }
 
-        return preferredIntensities
-            .flatMap(MusicAIService.fallbackSuggestions(for:))
+        let preferences = currentPreferences
+
+        return preferredIntensities.flatMap { intensity in
+            MusicRecommendationPolicy.fallbackSuggestions(
+                preferences: preferences,
+                intensity: intensity
+            )
+        }
     }
 
     private func uniqueAdaptiveMixPreviewSuggestions(

@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 final class RunHistoryStore: ObservableObject {
     static let shared = RunHistoryStore()
@@ -6,63 +7,39 @@ final class RunHistoryStore: ObservableObject {
     @Published private(set) var events: [RunEvent] = []
 
     private let storageKey = "RunHistoryStore.events"
-    private let queue = DispatchQueue(label: "RunHistoryStore.queue")
+    private let defaults: UserDefaults
 
-    private init() {
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
         load()
     }
 
     func add(event: RunEvent) {
-        queue.async { [weak self] in
-            DispatchQueue.main.async {
-                self?.events.insert(event, at: 0)
-                self?.save()
-            }
-        }
+        guard !events.contains(where: { $0.id == event.id }) else { return }
+        events.insert(event, at: 0)
+        save()
     }
 
     func remove(event: RunEvent) {
-        queue.async { [weak self] in
-            DispatchQueue.main.async {
-                self?.events.removeAll { $0.id == event.id }
-                self?.save()
-            }
-        }
+        events.removeAll { $0.id == event.id }
+        save()
     }
 
     private func load() {
-        queue.async { [weak self] in
-            guard let data = UserDefaults.standard.data(forKey: self?.storageKey ?? "") else {
-                DispatchQueue.main.async {
-                    self?.events = []
-                }
-                return
-            }
-
-            do {
-                let decoded = try JSONDecoder().decode([RunEvent].self, from: data)
-                DispatchQueue.main.async {
-                    self?.events = decoded
-                }
-            } catch {
-                print("Failed to load run events: \(error)")
-                DispatchQueue.main.async {
-                    self?.events = []
-                }
-            }
+        guard let data = defaults.data(forKey: storageKey) else { return }
+        do {
+            events = try JSONDecoder().decode([RunEvent].self, from: data)
+        } catch {
+            print("Failed to load run events: \(error)")
         }
     }
 
     private func save() {
-        let eventsToSave = events
-        let key = storageKey
-        queue.async {
-            do {
-                let data = try JSONEncoder().encode(eventsToSave)
-                UserDefaults.standard.set(data, forKey: key)
-            } catch {
-                print("Failed to save run events: \(error)")
-            }
+        do {
+            let data = try JSONEncoder().encode(events)
+            defaults.set(data, forKey: storageKey)
+        } catch {
+            print("Failed to save run events: \(error)")
         }
     }
 

@@ -30,6 +30,36 @@ struct PancakeApp: App {
 final class PancakeAppDelegate: NSObject, UIApplicationDelegate {
     func application(
         _ application: UIApplication,
+        didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
+    ) -> Bool {
+        // Activate WatchConnectivity and the coordinator's message observers at
+        // launch rather than when ContentView is first built. A background
+        // launch to deliver a queued watch message never connects a scene, so
+        // without this the workout-completed message is not handled and the run
+        // never reaches history.
+        MainActor.assumeIsolated {
+            _ = WatchConnectivityManager.shared
+            _ = WorkoutMusicCoordinator.shared
+        }
+        Task { @MainActor in
+            await CheerSquadManager.shared.refresh()
+        }
+        return true
+    }
+
+    func application(
+        _ application: UIApplication,
+        didReceiveRemoteNotification userInfo: [AnyHashable: Any],
+        fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void
+    ) {
+        Task { @MainActor in
+            let result = await CheerSquadManager.shared.handleRemoteNotification(userInfo)
+            completionHandler(result)
+        }
+    }
+
+    func application(
+        _ application: UIApplication,
         configurationForConnecting connectingSceneSession: UISceneSession,
         options: UIScene.ConnectionOptions
     ) -> UISceneConfiguration {
@@ -42,6 +72,12 @@ final class PancakeAppDelegate: NSObject, UIApplicationDelegate {
 }
 
 final class PancakeSceneDelegate: NSObject, UIWindowSceneDelegate {
+    func sceneWillEnterForeground(_ scene: UIScene) {
+        Task { @MainActor in
+            await CheerSquadManager.shared.refresh()
+        }
+    }
+
     func scene(_ scene: UIScene, willConnectTo session: UISceneSession, options connectionOptions: UIScene.ConnectionOptions) {
         if let metadata = connectionOptions.cloudKitShareMetadata {
             acceptShare(metadata)
@@ -107,7 +143,12 @@ private enum DebugSimulatorRunOrchestrator {
 
         let segments = simulatedRunSegments()
         WorkoutMusicCoordinator.shared.setPendingRunPlan(segments)
-        WatchConnectivityManager.shared.sendRunPlan(segments)
+        do {
+            try await WatchConnectivityManager.shared.sendRunPlan(segments)
+        } catch {
+            PancakeSimulatorLog("PANCAKE_SIM: Could not send plan: \(error.localizedDescription)")
+            return
+        }
         PancakeSimulatorLog("PANCAKE_SIM: iPhone sent run plan segments=\(segments.count) totalSeconds=\(segments.reduce(0) { $0 + $1.target.timeSeconds })")
     }
 

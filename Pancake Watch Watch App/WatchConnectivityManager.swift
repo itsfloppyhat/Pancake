@@ -38,8 +38,20 @@ final class WatchConnectivityManager: NSObject, ObservableObject {
     @Published var adaptiveMixNextSongArtist: String?
     @Published var lastCheer: ReceivedCheer?
     
+    /// Plans older than this are treated as leftovers from a previous session.
+    private static let runPlanExpiry: TimeInterval = 6 * 60 * 60
+    private static let pendingPlanKey = "WatchConnectivityManager.pendingPlan"
+    private static let latestPlanDateKey = "WatchConnectivityManager.latestPlanDate"
+    private var pendingPlan: PendingWatchRunPlan?
+
+    private var lastHandledRunPlanID: String? {
+        get { UserDefaults.standard.string(forKey: "WatchConnectivityManager.lastHandledRunPlanID") }
+        set { UserDefaults.standard.set(newValue, forKey: "WatchConnectivityManager.lastHandledRunPlanID") }
+    }
+
     private override init() {
         super.init()
+        restorePendingRunPlan()
         
         if WCSession.isSupported() {
             WCSession.default.delegate = self
@@ -47,10 +59,15 @@ final class WatchConnectivityManager: NSObject, ObservableObject {
         }
     }
     
-    func sendWorkoutStarted() {
+    func sendWorkoutStarted(runID: UUID, startedAt: Date, segments: [RunSegment]) {
         guard WCSession.isSupported() else { return }
         
-        let message = ["type": WatchMessageType.workoutStarted.rawValue] as [String : Any]
+        var message: [String: Any] = [
+            "type": WatchMessageType.workoutStarted.rawValue,
+            "runID": runID.uuidString,
+            "startedAt": startedAt.timeIntervalSince1970
+        ]
+        message["segments"] = try? JSONEncoder().encode(segments)
 
         if WCSession.default.isReachable {
             WCSession.default.sendMessage(message, replyHandler: { _ in
@@ -66,14 +83,27 @@ final class WatchConnectivityManager: NSObject, ObservableObject {
         }
     }
     
-    func sendWorkoutCompleted(totalDistanceKm: Double = 0, totalTimeSeconds: Int = 0) {
+    func sendWorkoutCompleted(
+        runID: UUID,
+        startedAt: Date,
+        endedAt: Date,
+        segments: [RunSegment],
+        totalDistanceKm: Double,
+        totalTimeSeconds: Int,
+        interruptionReason: String? = nil
+    ) {
         guard WCSession.isSupported() else { return }
 
-        let message: [String: Any] = [
+        var message: [String: Any] = [
             "type": WatchMessageType.workoutCompleted.rawValue,
+            "runID": runID.uuidString,
+            "startedAt": startedAt.timeIntervalSince1970,
+            "endedAt": endedAt.timeIntervalSince1970,
             "totalDistanceKm": totalDistanceKm,
             "totalTimeSeconds": totalTimeSeconds
         ]
+        message["segments"] = try? JSONEncoder().encode(segments)
+        message["interruptionReason"] = interruptionReason
 
         // Use sendMessage for immediate delivery, with transferUserInfo fallback
         if WCSession.default.isReachable {
@@ -93,8 +123,51 @@ final class WatchConnectivityManager: NSObject, ObservableObject {
     }
     
     func clearReceivedRunPlan() {
+        if let pendingPlan {
+            lastHandledRunPlanID = pendingPlan.id
+        }
+        pendingPlan = nil
+        UserDefaults.standard.removeObject(forKey: Self.pendingPlanKey)
         receivedRunPlan = []
         hasReceivedRunPlan = false
+    }
+
+    private func restorePendingRunPlan() {
+        guard let data = UserDefaults.standard.data(forKey: Self.pendingPlanKey),
+              let plan = try? JSONDecoder().decode(PendingWatchRunPlan.self, from: data),
+              plan.isUsable(at: Date(), expiry: Self.runPlanExpiry) else {
+            UserDefaults.standard.removeObject(forKey: Self.pendingPlanKey)
+            return
+        }
+        pendingPlan = plan
+        receivedRunPlan = plan.segments
+        hasReceivedRunPlan = true
+    }
+
+    /// A context may already have been delivered before SwiftUI or the workout
+    /// launch callback creates the manager, so explicitly inspect it on activation.
+    func restoreLatestRunPlan() {
+        guard WCSession.isSupported(), WCSession.default.activationState == .activated else { return }
+        let context = WCSession.default.receivedApplicationContext
+        guard context["type"] as? String == WatchMessageType.runPlan.rawValue else { return }
+        handleIncomingMessage(context)
+    }
+
+    /// The same plan arrives more than once by design: as a message, and again as the
+    /// application context every time the watch app launches. Accept each plan once,
+    /// and ignore a stale context so a dismissed plan doesn't come back tomorrow.
+    private func shouldAcceptRunPlan(_ message: [String: Any]) -> Bool {
+        if let planID = message["planID"] as? String {
+            guard planID != lastHandledRunPlanID else { return false }
+        }
+
+        if let sentAt = message["sentAt"] as? TimeInterval {
+            let age = Date().timeIntervalSince1970 - sentAt
+            guard age < Self.runPlanExpiry else { return false }
+            guard sentAt >= UserDefaults.standard.double(forKey: Self.latestPlanDateKey) else { return false }
+        }
+
+        return true
     }
 
     func sendMusicControl(_ action: String) {
@@ -116,6 +189,35 @@ final class WatchConnectivityManager: NSObject, ObservableObject {
             WCSession.default.transferUserInfo(message)
         }
     }
+
+    /// Interval controls are immediate intentions; never queue them for a later
+    /// interval or a different workout when the phone is disconnected.
+    func sendIntervalMusicControl(_ action: String, interval: IntervalChangePrompt, completion: @escaping (Error?) -> Void) {
+        guard WCSession.isSupported(), WCSession.default.isReachable else {
+            completion(NSError(domain: "Pancake.WatchMusic", code: 1, userInfo: [NSLocalizedDescriptionKey: "Open Pancake on iPhone to change music."]))
+            return
+        }
+        let message: [String: Any] = [
+            "type": "musicControl",
+            "action": action,
+            "runID": interval.runID.uuidString,
+            "segmentIndex": interval.segmentIndex,
+            "sentAt": Date().timeIntervalSince1970
+        ]
+        WCSession.default.sendMessage(message, replyHandler: { reply in
+            let error: Error?
+            if reply["status"] as? String == "success" {
+                error = nil
+            } else {
+                error = NSError(domain: "Pancake.WatchMusic", code: 2, userInfo: [
+                    NSLocalizedDescriptionKey: reply["error"] as? String ?? "iPhone couldn't apply this music control. Please try again."
+                ])
+            }
+            DispatchQueue.main.async { completion(error) }
+        }, errorHandler: { error in
+            DispatchQueue.main.async { completion(error) }
+        })
+    }
 }
 
 // MARK: - WCSessionDelegate
@@ -126,6 +228,9 @@ extension WatchConnectivityManager: WCSessionDelegate {
                 self.lastError = error
             }
             self.isReachable = session.isReachable
+            if activationState == .activated {
+                self.restoreLatestRunPlan()
+            }
         }
     }
 
@@ -167,14 +272,25 @@ extension WatchConnectivityManager: WCSessionDelegate {
 
         switch type {
         case WatchMessageType.runPlan.rawValue:
-            if let segmentsData = message["segments"] as? Data {
-                do {
-                    let segments = try JSONDecoder().decode([RunSegment].self, from: segmentsData)
-                    self.receivedRunPlan = segments
-                    self.hasReceivedRunPlan = true
-                } catch {
-                    self.lastError = error
-                }
+            guard let segmentsData = message["segments"] as? Data else { break }
+            guard shouldAcceptRunPlan(message) else { break }
+
+            do {
+                let segments = try JSONDecoder().decode([RunSegment].self, from: segmentsData)
+                guard !segments.isEmpty else { break }
+                let plan = PendingWatchRunPlan(
+                    id: message["planID"] as? String ?? UUID().uuidString,
+                    sentAt: Date(timeIntervalSince1970: message["sentAt"] as? TimeInterval ?? Date().timeIntervalSince1970),
+                    segments: segments
+                )
+                let data = try JSONEncoder().encode(plan)
+                UserDefaults.standard.set(data, forKey: Self.pendingPlanKey)
+                UserDefaults.standard.set(plan.sentAt.timeIntervalSince1970, forKey: Self.latestPlanDateKey)
+                self.pendingPlan = plan
+                self.receivedRunPlan = segments
+                self.hasReceivedRunPlan = true
+            } catch {
+                self.lastError = error
             }
         case WatchMessageType.startRun.rawValue:
             break

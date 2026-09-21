@@ -59,6 +59,9 @@ final class WorkoutMusicCoordinator: ObservableObject {
     private let musicManager = MusicPlaybackManager.shared
     private let aiService = MusicAIService.shared
     private let profileManager = UserProfileManager.shared
+    private let playedSongHistory = PlayedSongHistoryStore.shared
+    private let activeRunState = ActiveRunStateStore.shared
+    private var completionInbox: PendingRunCompletionStore?
     private let watchConnectivity = WatchConnectivityManager.shared
     private var cancellables = Set<AnyCancellable>()
 
@@ -134,6 +137,8 @@ final class WorkoutMusicCoordinator: ObservableObject {
     private init() {
         setupWatchConnectivity()
         setupMusicManager()
+        retryPendingRunCompletions()
+        restoreInterruptedRunIfNeeded()
     }
     
     // MARK: - Setup
@@ -148,7 +153,12 @@ final class WorkoutMusicCoordinator: ObservableObject {
             if let message = notification.object as? [String: Any],
                let action = message["action"] as? String {
                 Task { @MainActor in
-                    self?.handlePlaybackControl(action)
+                    guard let self else { return }
+                    if message["runID"] != nil {
+                        _ = self.handleIntervalMusicControl(message)
+                        return
+                    }
+                    self.handlePlaybackControl(action)
                 }
             }
         }
@@ -228,17 +238,28 @@ final class WorkoutMusicCoordinator: ObservableObject {
 
     // MARK: - Workout Management
 
-    func startWorkoutMusic(segments: [RunSegment]) {
+    func startWorkoutMusic(segments: [RunSegment], runID: UUID = UUID(), startedAt: Date = Date()) {
 
         guard !isWorkoutActive else {
             return
+        }
+
+        // A run recovered from a previous launch is still waiting for a
+        // completion message that is clearly never coming. Save it before the
+        // new run overwrites its snapshot.
+        if activeRunState.snapshot != nil {
+            guard saveRunEvent() else {
+                liveMetricsWarning = "The previous run could not be saved. Its recovery data has been kept. Free up storage and reopen Pancake."
+                return
+            }
+            currentWorkoutContext = nil
         }
 
         isWorkoutActive = true
         setIdleTimerDisabled(true)
 
         // Start time-series recording
-        workoutStartTime = Date()
+        workoutStartTime = startedAt
         workoutDataPoints = []
         songHistory = []
         lastRecordedSongID = nil
@@ -260,7 +281,15 @@ final class WorkoutMusicCoordinator: ObservableObject {
         lastMusicSuggestion = nil
         liveMetricsWarning = nil
         isLiveMetricsWarningDismissed = false
-        aiService.beginVarietySession()
+
+        // Mirror the run to disk from the first moment, so it survives the app
+        // being suspended or terminated before the watch reports completion.
+        activeRunState.beginRun(id: runID, segments: segments, startedAt: startedAt)
+
+        // Open a history slot for this run, then carry the last few runs'
+        // songs into the prompt so repeats are discouraged from the first pick.
+        playedSongHistory.beginRun()
+        aiService.beginVarietySession(carryingOver: playedSongHistory.promptAvoidedSongs)
         resetAdaptiveMixState()
 
         // Detect if this is a fartlek-style workout
@@ -282,11 +311,11 @@ final class WorkoutMusicCoordinator: ObservableObject {
         musicManager.startWorkoutMusic()
 
         // Let the Cheer Squad know (no-op unless sharing is set up).
-        CheerSquadManager.shared.workoutDidStart()
+        CheerSquadManager.shared.workoutDidStart(startedAt: startedAt)
     }
     
     func stopWorkoutMusic() {
-        guard isWorkoutActive else { return }
+        // Also clear restored runs, which have context but aren't active yet.
 
         // Stop recording timer
         stopRecordingTimer()
@@ -311,12 +340,13 @@ final class WorkoutMusicCoordinator: ObservableObject {
         liveMetricsWarning = nil
         isLiveMetricsWarningDismissed = false
         aiService.endVarietySession()
+        // A failed history commit must retain its on-disk recovery checkpoint.
         resetAdaptiveMixState()
 
         // Stop music playback
         musicManager.stopWorkoutMusic()
 
-        // End the run broadcast and clean up the public announcement.
+        // End the private run broadcast, including after process recovery.
         CheerSquadManager.shared.workoutDidEnd()
     }
     
@@ -620,6 +650,11 @@ final class WorkoutMusicCoordinator: ObservableObject {
         )
     }
 
+    /// Backfill candidates for a short Adaptive Mix queue, drawn from the
+    /// runner's own saved favorites and imported playlist rather than a shared
+    /// hard-coded song list. Each zone tags the same songs with its own mood,
+    /// and the guidance decides which zone is consulted first, so the mood that
+    /// survives deduplication is the one matching where the queue is heading.
     private func adaptiveMixFallbackSuggestions(for goalScore: AdaptiveMixGoalScore) -> [MusicSuggestion] {
         let preferredIntensities: [Intensity]
 
@@ -632,8 +667,14 @@ final class WorkoutMusicCoordinator: ObservableObject {
             preferredIntensities = [goalScore.targetIntensity] + Intensity.allCases
         }
 
-        return preferredIntensities
-            .flatMap(MusicAIService.fallbackSuggestions(for:))
+        let preferences = profileManager.userProfile.musicPreferences
+
+        return preferredIntensities.flatMap { intensity in
+            MusicRecommendationPolicy.fallbackSuggestions(
+                preferences: preferences,
+                intensity: intensity
+            )
+        }
     }
 
     private func adaptiveMixExcludedSongKeys(shouldStartPlayback: Bool) -> Set<String> {
@@ -667,6 +708,11 @@ final class WorkoutMusicCoordinator: ObservableObject {
         if let currentSong = musicManager.currentSong {
             appendIfNew(currentSong)
         }
+
+        // Songs still resting from recent runs. Capped by the store so a long
+        // avoid list cannot crowd out the rest of the prompt; the full set is
+        // still enforced by key filtering in adaptiveMixExcludedSongKeys.
+        playedSongHistory.promptAvoidedSongs.forEach(appendIfNew)
 
         if !shouldStartPlayback {
             for song in musicManager.adaptiveUpcomingSongs {
@@ -844,11 +890,13 @@ final class WorkoutMusicCoordinator: ObservableObject {
             print("Suggestion generation fell back: \(error)")
         }
 
-        let fallback = aiService.fallbackSuggestion(
+        guard let fallback = aiService.fallbackSuggestion(
             preferences: profileManager.userProfile.musicPreferences,
             intensity: fallbackIntensity,
             avoiding: reservedSongKeys
-        ).cleanedTitle()
+        )?.cleanedTitle() else {
+            return nil
+        }
 
         guard !reservedSongKeys.contains(fallback.sessionSongKey) else {
             return nil
@@ -874,11 +922,22 @@ final class WorkoutMusicCoordinator: ObservableObject {
             }
         }
 
-        if let emergencySuggestion = await musicManager.playEmergencyFallback(
-            preferences: profileManager.userProfile.musicPreferences,
-            intensity: fallbackIntensity,
-            avoiding: reservedSongKeys
-        ) {
+        // Last resort. The first attempt still rests songs from recent runs;
+        // the retry drops only that window so a small library ends up hearing
+        // a repeat rather than silence.
+        for includingRecentRuns in [true, false] {
+            guard let emergencySuggestion = await musicManager.playEmergencyFallback(
+                preferences: profileManager.userProfile.musicPreferences,
+                intensity: fallbackIntensity,
+                avoiding: reservedSongKeys(includingRecentRuns: includingRecentRuns)
+            ) else {
+                continue
+            }
+
+            if !includingRecentRuns {
+                print("Emergency fallback replayed a song still resting from a recent run")
+            }
+
             let songKey = emergencySuggestion.sessionSongKey
             playedSongsThisSession.insert(songKey)
             if let actualSongKey = musicManager.currentSong?.sessionSongKey {
@@ -940,12 +999,25 @@ final class WorkoutMusicCoordinator: ObservableObject {
         isAdvancingSong = false
     }
 
-    private var excludedSongKeys: Set<String> {
+    /// Songs already played or known unavailable during this workout.
+    private var sessionExcludedSongKeys: Set<String> {
         playedSongsThisSession.union(unavailableSongsThisSession)
     }
 
+    /// Songs that must not play again: this session's exclusions plus
+    /// everything still resting inside the recent-runs window.
+    private var excludedSongKeys: Set<String> {
+        sessionExcludedSongKeys.union(playedSongHistory.avoidedSongKeys)
+    }
+
     private var reservedSongKeys: Set<String> {
-        excludedSongKeys
+        reservedSongKeys(includingRecentRuns: true)
+    }
+
+    private func reservedSongKeys(includingRecentRuns: Bool) -> Set<String> {
+        let base = includingRecentRuns ? excludedSongKeys : sessionExcludedSongKeys
+
+        return base
             .union(prefetchedSuggestions.map(\.sessionSongKey))
             .union(musicManager.adaptiveUpcomingSongs.map(\.sessionSongKey))
     }
@@ -1175,6 +1247,9 @@ final class WorkoutMusicCoordinator: ObservableObject {
     private func handleWorkoutControl(_ action: String) {
         switch action {
         case "end":
+            // Commit before tearing down the live context; a failed commit
+            // retains its recovery checkpoint.
+            saveRunEvent()
             stopWorkoutMusic()
         case "pause":
             break
@@ -1194,28 +1269,67 @@ final class WorkoutMusicCoordinator: ObservableObject {
     private func handleWorkoutControlByType(_ type: String, message: [String: Any]) {
         switch type {
         case WatchMessageType.workoutStarted.rawValue, WatchMessageType.workoutStart.rawValue:
-            if let segments = pendingRunPlanSegments {
-                pendingRunPlanSegments = nil
-                startWorkoutMusic(segments: segments)
-            } else if let segments = decodeSegmentsFromWatchMessage(message) {
-                startWorkoutMusic(segments: segments)
-            } else {
-                // Watch started a workout without an iPhone plan. Keep a default
-                // context available if the user asks for a music suggestion.
-                let defaultSegments = [RunSegment(intensity: .zone2, target: .time(seconds: 1800))]
-                startWorkoutMusic(segments: defaultSegments)
+            if message["runID"] == nil, isWorkoutActive { return }
+            let runID = (message["runID"] as? String).flatMap(UUID.init(uuidString:)) ?? UUID()
+            guard !RunHistoryStore.shared.contains(runID: runID), !activeRunState.hasSaved(runID: runID) else { return }
+            if isWorkoutActive {
+                guard activeRunState.snapshot?.id != runID else { return }
+                // A new Watch run supersedes an interrupted session on this phone.
+                saveRunEvent()
+                stopWorkoutMusic()
             }
+            let startedAt = (message["startedAt"] as? Double).map(Date.init(timeIntervalSince1970:)) ?? Date()
+            let segments = decodeSegmentsFromWatchMessage(message) ?? pendingRunPlanSegments
+                ?? [RunSegment(intensity: .zone2, target: .time(seconds: 1800))]
+            pendingRunPlanSegments = nil
+            startWorkoutMusic(segments: segments, runID: runID, startedAt: startedAt)
 
         case WatchMessageType.workoutCompleted.rawValue:
-            pendingRunPlanSegments = nil
+            let completedRunID = (message["runID"] as? String).flatMap(UUID.init(uuidString:))
+            if let completedRunID,
+               let saved = RunHistoryStore.shared.events.first(where: { $0.id == completedRunID }) {
+                // A snapshot may have reached history before the Watch's final
+                // totals arrived. Preserve its detail while upserting those totals.
+                let event = RunEvent(id: saved.id, date: saved.date,
+                    totalDistanceMeters: (message["totalDistanceKm"] as? Double).map { Int($0 * 1000) } ?? saved.totalDistanceMeters,
+                    totalTimeSeconds: message["totalTimeSeconds"] as? Int ?? saved.totalTimeSeconds,
+                    segments: saved.segments.isEmpty ? (decodeSegmentsFromWatchMessage(message) ?? []) : saved.segments,
+                    dataPoints: saved.dataPoints, songHistory: saved.songHistory)
+                let committed = commitCompletedRun(event)
+                if activeRunState.snapshot?.id == completedRunID {
+                    if committed { activeRunState.clear() }
+                    stopWorkoutMusic()
+                } else if !isWorkoutActive, activeRunState.snapshot == nil {
+                    CheerSquadManager.shared.workoutDidEnd()
+                }
+                return
+            }
+            if let completedRunID, activeRunState.hasSaved(runID: completedRunID) {
+                // Don't recreate history that the user already deleted.
+                return
+            }
 
-            // Update context with final data from the Watch (distance, time)
-            // before saving, since periodic updates may have been slightly behind.
+            // A delayed completion must not finish a different, newer workout.
+            if let completedRunID, completedRunID != activeRunState.snapshot?.id {
+                let seconds = message["totalTimeSeconds"] as? Int ?? 0
+                let distance = message["totalDistanceKm"] as? Double ?? 0
+                guard seconds > 0 || distance > 0 else { return }
+                let endedAt = (message["endedAt"] as? Double).map(Date.init(timeIntervalSince1970:)) ?? Date()
+                let startedAt = (message["startedAt"] as? Double).map(Date.init(timeIntervalSince1970:))
+                    ?? endedAt.addingTimeInterval(-Double(seconds))
+                let event = RunEvent(id: completedRunID, date: startedAt,
+                                     totalDistanceMeters: Int(distance * 1000), totalTimeSeconds: seconds,
+                                     segments: decodeSegmentsFromWatchMessage(message) ?? [])
+                _ = commitCompletedRun(event)
+                if !isWorkoutActive, activeRunState.snapshot == nil { CheerSquadManager.shared.workoutDidEnd() }
+                return
+            }
+
+            pendingRunPlanSegments = nil
             if let context = currentWorkoutContext {
                 let finalDistanceKm = message["totalDistanceKm"] as? Double ?? context.totalDistance
                 let finalTimeSeconds = message["totalTimeSeconds"] as? Int ?? Int(context.totalTime)
-
-                let finalContext = makeWorkoutContext(
+                currentWorkoutContext = makeWorkoutContext(
                     segments: context.segments,
                     currentSegmentIndex: context.currentSegmentIndex,
                     totalDistance: finalDistanceKm,
@@ -1223,9 +1337,7 @@ final class WorkoutMusicCoordinator: ObservableObject {
                     heartRate: context.musicContext.currentHeartRate,
                     targetHeartRate: context.musicContext.targetHeartRate
                 )
-                currentWorkoutContext = finalContext
             }
-
             saveRunEvent()
             stopWorkoutMusic()
 
@@ -1235,6 +1347,10 @@ final class WorkoutMusicCoordinator: ObservableObject {
     }
 
     private func decodeSegmentsFromWatchMessage(_ message: [String: Any]) -> [RunSegment]? {
+        if let data = message["segments"] as? Data,
+           let segments = try? JSONDecoder().decode([RunSegment].self, from: data), !segments.isEmpty {
+            return segments
+        }
         guard let rawSegments = message["segments"] as? [[String: Any]], !rawSegments.isEmpty else {
             return nil
         }
@@ -1265,6 +1381,9 @@ final class WorkoutMusicCoordinator: ObservableObject {
     }
     
     private func handleWorkoutUpdate(_ message: [String: Any]) {
+        if let runID = message["runID"] as? String {
+            guard activeRunState.snapshot?.id.uuidString == runID else { return }
+        }
         guard isWorkoutActive, let context = currentWorkoutContext else { return }
 
         let segmentIndex = message["currentSegmentIndex"] as? Int ?? context.currentSegmentIndex
@@ -1441,6 +1560,7 @@ final class WorkoutMusicCoordinator: ObservableObject {
         )
 
         workoutDataPoints.append(dataPoint)
+        persistActiveRunSnapshot()
     }
 
     private func trackSongChange(_ song: MusicSong?) {
@@ -1471,6 +1591,7 @@ final class WorkoutMusicCoordinator: ObservableObject {
                 in: playedSongsThisSession
             )
             rememberPlayedSong(song)
+            playedSongHistory.recordPlayedSong(song)
             aiService.registerPlayedSong(song)
 
             if isNewlyPlayedSong {
@@ -1488,6 +1609,7 @@ final class WorkoutMusicCoordinator: ObservableObject {
         }
 
         lastRecordedSongID = songID
+        persistActiveRunSnapshot()
     }
 
     private func rememberHeartRate(_ heartRate: Int) {
@@ -1550,7 +1672,9 @@ final class WorkoutMusicCoordinator: ObservableObject {
     private func closeFinalSongPeriod() {
         guard let startTime = workoutStartTime, !songHistory.isEmpty else { return }
 
-        let elapsed = Date().timeIntervalSince(startTime)
+        let elapsed = currentWorkoutContext?.totalTime
+            ?? activeRunState.snapshot.map { TimeInterval($0.totalTimeSeconds) }
+            ?? Date().timeIntervalSince(startTime)
         let last = songHistory.removeLast()
         if last.endTimestamp == nil {
             songHistory.append(SongPeriod(
@@ -1566,40 +1690,172 @@ final class WorkoutMusicCoordinator: ObservableObject {
 
     // MARK: - Run Event Saving
 
-    private func saveRunEvent() {
-        guard let context = currentWorkoutContext else {
-            print("⚠️ saveRunEvent: No workout context available")
-            return
-        }
+    /// Mirrors the live run to disk so a suspended or terminated app can still
+    /// save a complete run event when the watch's completion message arrives.
+    private func persistActiveRunSnapshot() {
+        guard isWorkoutActive, let context = currentWorkoutContext else { return }
 
-        let totalDistanceMeters = Int(context.totalDistance * 1000.0)
-        let totalTimeSeconds = Int(context.totalTime)
-
-        // Log for debugging
-        print("📊 saveRunEvent: distance=\(totalDistanceMeters)m, time=\(totalTimeSeconds)s, dataPoints=\(workoutDataPoints.count)")
-
-        // Save even if distance/time seem small — the Watch data is authoritative.
-        // Only skip if there's truly no data at all (e.g. immediate cancel).
-        guard totalTimeSeconds > 0 || totalDistanceMeters > 0 else {
-            print("⚠️ saveRunEvent: Skipping — no distance or time data")
-            return
-        }
-
-        let event = RunEvent(
-            totalDistanceMeters: totalDistanceMeters,
-            totalTimeSeconds: totalTimeSeconds,
-            segments: context.segments,
+        activeRunState.update(
+            currentSegmentIndex: context.currentSegmentIndex,
+            totalDistanceKm: context.totalDistance,
+            totalTimeSeconds: Int(context.totalTime),
             dataPoints: workoutDataPoints,
             songHistory: songHistory
         )
+    }
 
-        RunHistoryStore.shared.add(event: event)
+    /// Recovers a run that was interrupted by the app being killed. The run is
+    /// rehydrated into memory rather than saved immediately, so a late
+    /// completion message can still supply the watch's authoritative totals.
+    /// A snapshot old enough that no completion is coming is flushed to history.
+    private func restoreInterruptedRunIfNeeded() {
+        guard !isWorkoutActive, let snapshot = activeRunState.snapshot else { return }
+
+        guard !activeRunState.hasSaved(runID: snapshot.id) else {
+            activeRunState.clear()
+            return
+        }
+
+        workoutStartTime = snapshot.startedAt
+        workoutDataPoints = snapshot.dataPoints
+        songHistory = snapshot.songHistory
+        currentWorkoutContext = makeWorkoutContext(
+            segments: snapshot.segments,
+            currentSegmentIndex: snapshot.currentSegmentIndex,
+            totalDistance: snapshot.totalDistanceKm,
+            totalTime: TimeInterval(snapshot.totalTimeSeconds),
+            heartRate: nil,
+            targetHeartRate: nil
+        )
+
+        print("♻️ Recovered interrupted run from \(snapshot.startedAt): dataPoints=\(snapshot.dataPoints.count)")
+
+        if RunEventRecoveryPolicy.isStale(snapshot) {
+            print("♻️ No completion message arrived for the recovered run — saving it now")
+            saveRunEvent()
+            currentWorkoutContext = nil
+            workoutStartTime = nil
+            workoutDataPoints = []
+            songHistory = []
+        }
+    }
+
+    @discardableResult
+    private func saveRunEvent() -> Bool {
+        closeFinalSongPeriod()
+        if let context = currentWorkoutContext {
+            activeRunState.update(currentSegmentIndex: context.currentSegmentIndex,
+                                  totalDistanceKm: context.totalDistance,
+                                  totalTimeSeconds: Int(context.totalTime),
+                                  dataPoints: workoutDataPoints, songHistory: songHistory)
+        }
+        // Prefer live context; fall back to the on-disk snapshot when the app
+        // was killed mid-run and only the completion message brought us back.
+        let snapshot = activeRunState.snapshot
+        let runID = snapshot?.id ?? UUID()
+
+        guard !activeRunState.hasSaved(runID: runID) else {
+            print("⚠️ saveRunEvent: Run already saved, skipping duplicate")
+            activeRunState.clear()
+            return true
+        }
+
+        let resolution = RunEventRecoveryPolicy.resolve(
+            liveSegments: currentWorkoutContext?.segments,
+            liveTotalDistanceKm: currentWorkoutContext?.totalDistance,
+            liveTotalTimeSeconds: currentWorkoutContext.map { Int($0.totalTime) },
+            liveDataPoints: workoutDataPoints,
+            liveSongHistory: songHistory,
+            snapshot: snapshot
+        )
+
+        // Log for debugging
+        print("📊 saveRunEvent: distance=\(resolution.totalDistanceMeters)m, time=\(resolution.totalTimeSeconds)s, dataPoints=\(resolution.dataPoints.count), recovered=\(currentWorkoutContext == nil)")
+
+        // Save even if distance/time seem small — the Watch data is authoritative.
+        // Only skip if there's truly no data at all (e.g. immediate cancel).
+        guard resolution.isSavable else {
+            print("⚠️ saveRunEvent: Skipping — no distance or time data")
+            activeRunState.clear()
+            return true
+        }
+
+        let event = RunEvent(
+            id: runID,
+            date: resolution.date,
+            totalDistanceMeters: resolution.totalDistanceMeters,
+            totalTimeSeconds: resolution.totalTimeSeconds,
+            segments: resolution.segments,
+            dataPoints: resolution.dataPoints,
+            songHistory: resolution.songHistory
+        )
+
+        guard commitCompletedRun(event) else {
+            print("Could not save run history; retaining the recovery snapshot")
+            return false
+        }
+        activeRunState.clear()
         print("✅ saveRunEvent: Run event saved successfully")
         #if DEBUG
         if Self.isSimulatorLoggingEnabled {
-            PancakeSimulatorLog("PANCAKE_SIM:SAVE_RUN_EVENT distanceMeters=\(totalDistanceMeters) totalSeconds=\(totalTimeSeconds)")
+            PancakeSimulatorLog("PANCAKE_SIM:SAVE_RUN_EVENT distanceMeters=\(resolution.totalDistanceMeters) totalSeconds=\(resolution.totalTimeSeconds)")
         }
         #endif
+        return true
+    }
+
+    /// Return a rejection to the watch instead of acknowledging a stale action
+    /// that did not change playback. The caller already runs on the main actor.
+    func handleIntervalMusicControl(_ message: [String: Any]) -> String? {
+        guard let runID = message["runID"] as? String,
+              let segmentIndex = message["segmentIndex"] as? Int,
+              isWorkoutActive,
+              activeRunState.snapshot?.id.uuidString == runID,
+              currentWorkoutContext?.currentSegmentIndex == segmentIndex else {
+            return "This interval is no longer active on iPhone. Open Pancake on iPhone to check the run."
+        }
+        guard let action = message["action"] as? String,
+              ["next", "suggest", "play", "pause"].contains(action) else {
+            return "This music control isn't available."
+        }
+        handlePlaybackControl(action)
+        return nil
+    }
+
+    private func loadCompletionInbox() throws -> PendingRunCompletionStore {
+        if let completionInbox { return completionInbox }
+        let inbox = try PendingRunCompletionStore()
+        completionInbox = inbox
+        return inbox
+    }
+
+    /// Journal completions independently of the current workout. This preserves
+    /// an out-of-order completion without replacing a newer run's checkpoint.
+    private func commitCompletedRun(_ event: RunEvent) -> Bool {
+        do {
+            try loadCompletionInbox().upsert(event)
+        } catch {
+            print("Could not checkpoint completed run: \(error.localizedDescription)")
+        }
+        guard RunHistoryStore.shared.add(event: event) else { return false }
+        activeRunState.markSaved(runID: event.id)
+        do {
+            try completionInbox?.remove(runID: event.id)
+        } catch {
+            // Replaying this entry is safe because history uses the same run ID.
+            print("Completed run will be reconciled at next launch: \(error.localizedDescription)")
+        }
+        return true
+    }
+
+    private func retryPendingRunCompletions() {
+        do {
+            for event in try loadCompletionInbox().events {
+                _ = commitCompletedRun(event)
+            }
+        } catch {
+            print("Could not load pending run completions; will retry on the next completion: \(error.localizedDescription)")
+        }
     }
 
     private func logSimulatorQueueSnapshotIfNeeded(trigger: AdaptiveMixCurationTrigger) {

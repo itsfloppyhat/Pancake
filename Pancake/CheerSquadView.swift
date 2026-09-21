@@ -1,10 +1,12 @@
 import CloudKit
 import SwiftUI
+import UIKit
 
 struct CheerSquadView: View {
     @StateObject private var manager = CheerSquadManager.shared
     @Environment(\.dismiss) private var dismiss
     @State private var memberToBlock: SquadMember?
+    @State private var shareToManage: CheerSquadSharePresentation?
 
     var body: some View {
         NavigationStack {
@@ -18,6 +20,10 @@ struct CheerSquadView: View {
 
                     if let errorMessage = manager.lastErrorMessage {
                         CheerSquadNoticeCard(message: errorMessage)
+                    }
+
+                    if let migrationNotice = manager.sharingMigrationNotice {
+                        CheerSquadNoticeCard(message: migrationNotice)
                     }
 
                     mySquadCard
@@ -44,6 +50,11 @@ struct CheerSquadView: View {
             }
             .refreshable {
                 await manager.refresh()
+            }
+            .sheet(item: $shareToManage, onDismiss: {
+                Task { await manager.refresh() }
+            }) { presentation in
+                CheerSquadSharingController(share: presentation.share, container: manager.container)
             }
             .alert(
                 "Remove from squad?",
@@ -74,7 +85,7 @@ struct CheerSquadView: View {
             Text("Friends who cheer you on")
                 .font(.headline)
 
-            Text("Invite supporters with a private iCloud link. When you start a run they get a notification, and their cheers are read aloud over your music.")
+            Text("Invite specific iCloud accounts to your squad. Supporters can get an alert when you start a run and send cheers to hear over your music. Run alerts may be delayed by background delivery.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -88,17 +99,20 @@ struct CheerSquadView: View {
                 .font(.headline)
 
             if manager.isSharingEnabled {
-                if let shareURL = manager.shareURL {
-                    ShareLink(item: shareURL) {
-                        Label("Invite supporters", systemImage: "person.badge.plus")
+                if let share = manager.ownShare {
+                    Button {
+                        shareToManage = CheerSquadSharePresentation(share: share)
+                    } label: {
+                        Label("Invite and manage supporters", systemImage: "person.badge.plus")
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(BubblyGradientButtonStyle(gradient: .pastelStart))
+                    .disabled(manager.isBusy)
                 }
 
                 let supporters = manager.squadMembers.filter { !$0.isOwner }
                 if supporters.isEmpty {
-                    Text("No supporters yet. Share your invite link to build your squad.")
+                    Text("No supporters yet. Invite people using the email address or phone number on their Apple Account.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {
@@ -122,6 +136,7 @@ struct CheerSquadView: View {
                             }
                             .font(.caption)
                             .foregroundStyle(Color.pastelCoral)
+                            .disabled(manager.isBusy)
                         }
                     }
                 }
@@ -140,12 +155,17 @@ struct CheerSquadView: View {
                 }
                 .buttonStyle(BubblySmallButtonStyle(backgroundColor: .pastelLavender))
             } else {
-                Text("Set up your squad to share a private invite link. Only people you invite can see when you run.")
+                Text("Set up your squad, then choose the people to invite. Forwarding an invitation link does not give someone else access.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
 
                 Button {
-                    Task { await manager.enableSharing() }
+                    Task {
+                        await manager.enableSharing()
+                        if let share = manager.ownShare {
+                            shareToManage = CheerSquadSharePresentation(share: share)
+                        }
+                    }
                 } label: {
                     if manager.isBusy {
                         ProgressView()
@@ -260,6 +280,56 @@ struct CheerSquadView: View {
             get: { manager.settings.announceCheersDuringRuns },
             set: { manager.settings.announceCheersDuringRuns = $0 }
         )
+    }
+}
+
+// MARK: - System sharing UI
+
+private struct CheerSquadSharePresentation: Identifiable {
+    let id = UUID()
+    let share: CKShare
+}
+
+private struct CheerSquadSharingController: UIViewControllerRepresentable {
+    let share: CKShare
+    let container: CKContainer
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeUIViewController(context: Context) -> UICloudSharingController {
+        let controller = UICloudSharingController(share: share, container: container)
+        // Public-link access must never be selectable: individual revocation
+        // depends on an explicit private participant list.
+        controller.availablePermissions = [.allowPrivate, .allowReadWrite]
+        controller.delegate = context.coordinator
+        controller.modalPresentationStyle = .formSheet
+        if let popover = controller.popoverPresentationController {
+            popover.sourceView = controller.view
+            popover.sourceRect = controller.view.bounds
+            popover.permittedArrowDirections = []
+        }
+        return controller
+    }
+
+    func updateUIViewController(_ controller: UICloudSharingController, context: Context) {}
+
+    @MainActor
+    final class Coordinator: NSObject, UICloudSharingControllerDelegate {
+        func itemTitle(for controller: UICloudSharingController) -> String? {
+            "Pancake Cheer Squad"
+        }
+
+        func cloudSharingController(_ controller: UICloudSharingController, failedToSaveShareWithError error: Error) {
+            CheerSquadManager.shared.lastErrorMessage = error.localizedDescription
+        }
+
+        func cloudSharingControllerDidSaveShare(_ controller: UICloudSharingController) {
+            Task { await CheerSquadManager.shared.sharingControllerDidSave() }
+        }
+
+        func cloudSharingControllerDidStopSharing(_ controller: UICloudSharingController) {
+            Task { await CheerSquadManager.shared.sharingControllerDidStopSharing() }
+        }
     }
 }
 

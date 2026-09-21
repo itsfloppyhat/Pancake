@@ -193,37 +193,50 @@ enum MusicRecommendationPolicy {
         return allAbove || allBelow
     }
 
-    static func fallbackSuggestion(
+    /// Fallback candidates drawn entirely from the runner's own saved taste:
+    /// their manual favorites first, then their imported playlist sample.
+    /// Returns an empty list when no taste has been saved yet — there is no
+    /// shared hard-coded catalog to fall back on.
+    static func fallbackSuggestions(
         preferences: MusicPreferences,
-        intensity: Intensity,
-        avoiding avoidedSongKeys: Set<String>
-    ) -> MusicSuggestion? {
+        intensity: Intensity
+    ) -> [MusicSuggestion] {
         let mood = defaultMood(for: intensity)
-        let manualFavorites = preferences.favoriteSongs.filter { !avoidedSongKeys.contains($0.sessionSongKey) }
+        let playlistName = preferences.selectedPlaylist?.name ?? "their imported taste sample"
 
-        if let favoriteSong = manualFavorites.first {
-            return MusicSuggestion(
-                songTitle: favoriteSong.title,
-                artist: favoriteSong.artist,
+        let manualFavorites = preferences.favoriteSongs.map { song in
+            MusicSuggestion(
+                songTitle: song.title,
+                artist: song.artist,
                 reason: "Using one of the runner's saved favorite songs as a fast fallback while keeping the \(intensity.label) effort on track.",
                 mood: mood,
                 confidence: 0.66
             )
         }
 
-        let importedPlaylistSongs = preferences.importedPlaylistSongs.filter { !avoidedSongKeys.contains($0.sessionSongKey) }
-        if let playlistSong = importedPlaylistSongs.first {
-            let playlistName = preferences.selectedPlaylist?.name ?? "their imported taste sample"
-            return MusicSuggestion(
-                songTitle: playlistSong.title,
-                artist: playlistSong.artist,
+        let importedPlaylistSongs = preferences.importedPlaylistSongs.map { song in
+            MusicSuggestion(
+                songTitle: song.title,
+                artist: song.artist,
                 reason: "Using a song from \(playlistName) as a fast fallback that still matches the runner's taste profile.",
                 mood: mood,
                 confidence: 0.62
             )
         }
 
-        return nil
+        var seenSongKeys = Set<String>()
+        return (manualFavorites + importedPlaylistSongs).filter {
+            seenSongKeys.insert($0.sessionSongKey).inserted
+        }
+    }
+
+    static func fallbackSuggestion(
+        preferences: MusicPreferences,
+        intensity: Intensity,
+        avoiding avoidedSongKeys: Set<String>
+    ) -> MusicSuggestion? {
+        fallbackSuggestions(preferences: preferences, intensity: intensity)
+            .first { !avoidedSongKeys.contains($0.sessionSongKey) }
     }
 
     static func defaultMood(for intensity: Intensity) -> MusicMood {
@@ -239,6 +252,97 @@ enum MusicRecommendationPolicy {
         case .zone5:
             return .intense
         }
+    }
+}
+
+/// The songs played during a single run, kept so later runs can avoid them.
+struct RunSongHistory: Codable, Equatable, Identifiable {
+    let id: UUID
+    let startedAt: Date
+    var songs: [MusicSong]
+
+    init(id: UUID = UUID(), startedAt: Date = Date(), songs: [MusicSong] = []) {
+        self.id = id
+        self.startedAt = startedAt
+        self.songs = songs
+    }
+
+    var isEmpty: Bool {
+        songs.isEmpty
+    }
+}
+
+/// Keeps a song out of rotation for the run it played in plus the next three,
+/// so a repeat is only possible on the fifth run.
+enum CrossRunSongHistoryPolicy {
+    /// The current run plus the three that must pass before a repeat is allowed.
+    static let retainedRunCount = 4
+
+    /// How many recent songs are named in the prompt text. The full retained
+    /// set is still enforced by key filtering; this cap only keeps the
+    /// on-device model's context window from filling up with avoid lists.
+    static let promptAvoidListLimit = 12
+
+    /// Opens a slot for a new run. A previous run that never played a song is
+    /// replaced rather than retained, so an abandoned start does not age real
+    /// history out of the window early.
+    static func beginningRun(
+        in runs: [RunSongHistory],
+        newRun: RunSongHistory = RunSongHistory()
+    ) -> [RunSongHistory] {
+        var updated = runs
+
+        if let last = updated.last, last.isEmpty {
+            updated.removeLast()
+        }
+
+        updated.append(newRun)
+        return Array(updated.suffix(retainedRunCount))
+    }
+
+    /// Records a played song against the run currently in progress.
+    static func recordingPlayedSong(
+        _ song: MusicSong,
+        in runs: [RunSongHistory]
+    ) -> [RunSongHistory] {
+        guard var currentRun = runs.last else {
+            return beginningRun(in: runs, newRun: RunSongHistory(songs: [song]))
+        }
+
+        guard !currentRun.songs.contains(where: { $0.sessionSongKey == song.sessionSongKey }) else {
+            return runs
+        }
+
+        currentRun.songs.append(song)
+
+        var updated = runs
+        updated[updated.count - 1] = currentRun
+        return updated
+    }
+
+    /// Every song key blocked by the retained window.
+    static func avoidedSongKeys(in runs: [RunSongHistory]) -> Set<String> {
+        Set(runs.suffix(retainedRunCount).flatMap(\.songs).map(\.sessionSongKey))
+    }
+
+    /// The most recently played songs across the retained window, newest first,
+    /// capped for prompt use.
+    static func recentAvoidedSongs(
+        in runs: [RunSongHistory],
+        limit: Int = promptAvoidListLimit
+    ) -> [MusicSong] {
+        var seenSongKeys = Set<String>()
+        var songs: [MusicSong] = []
+
+        for run in runs.suffix(retainedRunCount).reversed() {
+            for song in run.songs.reversed() {
+                guard songs.count < limit else { return songs }
+                guard seenSongKeys.insert(song.sessionSongKey).inserted else { continue }
+                songs.append(song)
+            }
+        }
+
+        return songs
     }
 }
 

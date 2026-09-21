@@ -1,79 +1,67 @@
 import Foundation
+import Combine
 
+@MainActor
 final class RunHistoryStore: ObservableObject {
     static let shared = RunHistoryStore()
 
     @Published private(set) var events: [RunEvent] = []
+    @Published private(set) var persistenceError: String?
 
-    private let storageKey = "RunHistoryStore.events"
-    private let queue = DispatchQueue(label: "RunHistoryStore.queue")
+    private var repository: RunHistoryRepository?
+    private let directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
 
     private init() {
-        load()
-    }
-
-    func add(event: RunEvent) {
-        queue.async { [weak self] in
-            DispatchQueue.main.async {
-                self?.events.insert(event, at: 0)
-                self?.save()
-            }
+        do {
+            try loadRepository()
+        } catch {
+            persistenceError = error.localizedDescription
         }
     }
 
-    func addEvent(event: RunEvent) async {
-        await MainActor.run {
-            events.insert(event, at: 0)
-            save()
+    /// Returns only after the run is on disk, or leaves the previous history
+    /// untouched on failure. Callers must retain their recovery checkpoint then.
+    @discardableResult
+    func add(event: RunEvent) -> Bool {
+        do {
+            let repository = try loadRepository()
+            try repository.add(event)
+            events = repository.events
+            persistenceError = nil
+            return true
+        } catch {
+            persistenceError = error.localizedDescription
+            return false
         }
+    }
+
+    func contains(runID: UUID) -> Bool {
+        events.contains { $0.id == runID }
     }
 
     func remove(event: RunEvent) {
-        queue.async { [weak self] in
-            DispatchQueue.main.async {
-                self?.events.removeAll { $0.id == event.id }
-                self?.save()
-            }
-        }
+        replaceEvents(events.filter { $0.id != event.id })
     }
 
-    private func load() {
-        queue.async { [weak self] in
-            guard let data = UserDefaults.standard.data(forKey: self?.storageKey ?? "") else {
-                DispatchQueue.main.async {
-                    self?.events = []
-                }
-                return
-            }
-
-            do {
-                let decoded = try JSONDecoder().decode([RunEvent].self, from: data)
-                DispatchQueue.main.async {
-                    self?.events = decoded
-                }
-            } catch {
-                print("Failed to load run events: \(error)")
-                DispatchQueue.main.async {
-                    self?.events = []
-                }
-            }
-        }
+    @discardableResult
+    private func loadRepository() throws -> RunHistoryRepository {
+        if let repository { return repository }
+        let loaded = try RunHistoryRepository(directory: directory)
+        repository = loaded
+        events = loaded.events
+        return loaded
     }
 
-    private func save() {
-        let eventsToSave = events
-        let key = storageKey
-        queue.async {
-            do {
-                let data = try JSONEncoder().encode(eventsToSave)
-                UserDefaults.standard.set(data, forKey: key)
-            } catch {
-                print("Failed to save run events: \(error)")
-            }
+    private func replaceEvents(_ updated: [RunEvent]) {
+        do {
+            let repository = try loadRepository()
+            try repository.replace(with: updated)
+            events = repository.events
+            persistenceError = nil
+        } catch {
+            persistenceError = error.localizedDescription
         }
     }
-
-    // MARK: - Statistics
 
     var totalDistanceKm: Double {
         events.reduce(0) { $0 + Double($1.totalDistanceMeters) / 1000.0 }
@@ -88,42 +76,25 @@ final class RunHistoryStore: ObservableObject {
         return Double(totalDurationSeconds) / totalDistanceKm
     }
 
-    var runCount: Int {
-        events.count
-    }
+    var runCount: Int { events.count }
+    var mostRecentRunDate: Date? { events.first?.date }
 
-    var mostRecentRunDate: Date? {
-        events.first?.date
-    }
-
-    // MARK: - HealthKit Integration
-
-    nonisolated func importFromHealthKit() async throws -> Int {
-        let healthKitManager = await HealthKitManager.shared
-
-        guard await healthKitManager.isAuthorized else {
-            throw HealthKitError.notAuthorized
-        }
-
+    func importFromHealthKit() async throws -> Int {
+        let healthKitManager = HealthKitManager.shared
+        guard healthKitManager.isAuthorized else { throw HealthKitError.notAuthorized }
         let importedEvents = try await healthKitManager.importRunningHistory()
-
-        let currentEvents = await MainActor.run { events }
-
-        let existingEventKeys = Set(currentEvents.map { "\($0.date.timeIntervalSince1970)-\($0.totalDistanceMeters)" })
-        let newEvents = importedEvents.filter { event in
-            let eventKey = "\(event.date.timeIntervalSince1970)-\(event.totalDistanceMeters)"
-            return !existingEventKeys.contains(eventKey)
+        let repository = try loadRepository()
+        let existingKeys = Set(events.map { "\($0.date.timeIntervalSince1970)-\($0.totalDistanceMeters)" })
+        let newEvents = importedEvents.filter {
+            !existingKeys.contains("\($0.date.timeIntervalSince1970)-\($0.totalDistanceMeters)")
         }
-
-        for event in newEvents {
-            await addEvent(event: event)
-        }
-
+        try repository.replace(with: events + newEvents)
+        events = repository.events
+        persistenceError = nil
         return newEvents.count
     }
 
     func clearHealthKitData() {
-        events.removeAll()
-        save()
+        replaceEvents([])
     }
 }

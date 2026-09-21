@@ -278,6 +278,8 @@ if len(played) < 2:
 required_markers = [
     "PANCAKE_SIM: Watch requested Adaptive Mix",
     "PANCAKE_SIM: Watch requested next song",
+    "PANCAKE_SIM: Watch interval music action acknowledged",
+    "PANCAKE_SIM: Stale interval music action rejected",
     "PANCAKE_SIM: Watch simulated workout completed",
     "PANCAKE_SIM:SAVE_RUN_EVENT",
 ]

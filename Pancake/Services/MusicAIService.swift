@@ -55,7 +55,7 @@ enum MusicAIError: LocalizedError {
 
 @Generable
 struct GenerableMusicSuggestion {
-    @Guide(description: "The exact title of a real, commercially released song only, without the artist name. Do not invent titles or reuse a real title with the wrong artist. For example: 'Blinding Lights' not 'Blinding Lights by The Weeknd'")
+    @Guide(description: "The exact title of a real, commercially released song only, without the artist name. Do not invent titles or reuse a real title with the wrong artist. For example: 'Song Title' not 'Song Title by Artist Name'")
     let songTitle: String
 
     @Guide(description: "The real primary artist or band name only, separate from the song title")
@@ -113,6 +113,11 @@ final class MusicAIService: ObservableObject {
     private var recentSuggestions: [String] = []
     private var recentSuggestionKeys: Set<String> = []
     private var isVarietySessionActive = false
+
+    /// Songs played in recent previous runs. They are named in the avoid list
+    /// like session songs, but they do not count toward the session-discovery
+    /// and variety-escalation thresholds, which describe the current run.
+    private var carriedOverSuggestions: [String] = []
 
     /// Guards against concurrent FoundationModels requests which crash the session.
     private var isRequestInFlight = false
@@ -563,9 +568,12 @@ final class MusicAIService: ObservableObject {
         recentSuggestions.append(suggestionKey)
     }
 
-    func beginVarietySession() {
+    /// - Parameter carryingOver: songs played in recent previous runs, so the
+    ///   model is told not to repeat them even on this run's first suggestion.
+    func beginVarietySession(carryingOver previouslyPlayedSongs: [MusicSong] = []) {
         isVarietySessionActive = true
         clearVarietyTracking()
+        carriedOverSuggestions = previouslyPlayedSongs.map { "\($0.artist) - \($0.title)" }
     }
 
     func endVarietySession() {
@@ -577,26 +585,26 @@ final class MusicAIService: ObservableObject {
     func clearVarietyTracking() {
         recentSuggestions.removeAll()
         recentSuggestionKeys.removeAll()
+        carriedOverSuggestions.removeAll()
     }
 
     func registerPlayedSong(_ song: MusicSong) {
         trackSongIdentity(title: song.title, artist: song.artist)
     }
 
+    /// A fast fallback drawn from the runner's own saved taste. Returns nil when
+    /// they have no saved favorites or imported playlist songs left to use —
+    /// there is no shared hard-coded song list to fall back on.
     func fallbackSuggestion(
         preferences: MusicPreferences,
         intensity: Intensity,
         avoiding avoidedSongKeys: Set<String>
-    ) -> MusicSuggestion {
-        if let preferenceFallback = MusicRecommendationPolicy.fallbackSuggestion(
+    ) -> MusicSuggestion? {
+        MusicRecommendationPolicy.fallbackSuggestion(
             preferences: preferences,
             intensity: intensity,
             avoiding: avoidedSongKeys
-        ) {
-            return preferenceFallback
-        }
-
-        return Self.fallbackSuggestion(for: intensity)
+        )
     }
 
     // MARK: - Mapping
@@ -1437,13 +1445,18 @@ final class MusicAIService: ObservableObject {
 
     private func buildVarietyGuidance(avoiding avoidedSongs: [MusicSong] = []) -> String {
         let locallyAvoidedSuggestions = avoidedSongs.map { "\($0.artist) - \($0.title)" }
+        // Thresholds below describe how much has been heard on THIS run, so
+        // carried-over songs from previous runs are excluded from the count.
         let suggestionsToAvoid = recentSuggestions + locallyAvoidedSuggestions
+        let carriedOverToAvoid = carriedOverSuggestions.filter { !suggestionsToAvoid.contains($0) }
+        let allSuggestionsToAvoid = suggestionsToAvoid + carriedOverToAvoid
 
-        guard !suggestionsToAvoid.isEmpty, isVarietySessionActive || !locallyAvoidedSuggestions.isEmpty else {
+        guard !allSuggestionsToAvoid.isEmpty,
+              isVarietySessionActive || !locallyAvoidedSuggestions.isEmpty else {
             return ""
         }
 
-        let avoidList = suggestionsToAvoid.joined(separator: ", ")
+        let avoidList = allSuggestionsToAvoid.joined(separator: ", ")
 
         let recentArtists = suggestionsToAvoid.map { suggestion in
             suggestion.components(separatedBy: " - ").first ?? suggestion
@@ -1461,6 +1474,13 @@ final class MusicAIService: ObservableObject {
         SONGS TO AVOID FOR THIS SELECTION: \(avoidList).
         Do not repeat any of these songs. Pick a different song.
         """
+
+        if !carriedOverToAvoid.isEmpty {
+            guidance += """
+
+            RECENT RUNS: That avoid list includes songs from the runner's last few runs, not just this one. They are rested for several runs to keep the rotation fresh, so reach for a different song by a related artist rather than working around the edges of the same few tracks.
+            """
+        }
 
         if suggestionsToAvoid.count >= 2 {
             guidance += """
@@ -1564,48 +1584,6 @@ final class MusicAIService: ObservableObject {
 // MARK: - Fallback Suggestions
 
 extension MusicAIService {
-    /// Pre-curated suggestions when AI is unavailable
-    static func fallbackSuggestion(for intensity: Intensity) -> MusicSuggestion {
-        fallbackSuggestions(for: intensity).randomElement() ?? MusicSuggestion(
-            songTitle: "Don't Stop Me Now",
-            artist: "Queen",
-            reason: "Classic workout anthem",
-            mood: .energetic,
-            confidence: 0.5
-        )
-    }
-
-    static func fallbackSuggestions(for intensity: Intensity) -> [MusicSuggestion] {
-        let suggestions: [Intensity: [MusicSuggestion]] = [
-            .zone1: [
-                MusicSuggestion(songTitle: "Banana Pancakes", artist: "Jack Johnson", reason: "Low-arousal recovery music for Zone 1.", mood: .calming, confidence: 0.7),
-                MusicSuggestion(songTitle: "Here Comes the Sun", artist: "The Beatles", reason: "Gentle, relaxed energy for warm-up or cool-down.", mood: .chill, confidence: 0.7),
-                MusicSuggestion(songTitle: "Better Together", artist: "Jack Johnson", reason: "Soft acoustic pacing that will not push effort upward.", mood: .calming, confidence: 0.7)
-            ],
-            .zone2: [
-                MusicSuggestion(songTitle: "Good Vibrations", artist: "The Beach Boys", reason: "Feel-good but relaxed energy for aerobic base work.", mood: .chill, confidence: 0.7),
-                MusicSuggestion(songTitle: "Riptide", artist: "Vance Joy", reason: "Gently upbeat acoustic pop for easy endurance.", mood: .upbeat, confidence: 0.7),
-                MusicSuggestion(songTitle: "Budapest", artist: "George Ezra", reason: "Smooth, controlled rhythm for Zone 2 running.", mood: .chill, confidence: 0.7)
-            ],
-            .zone3: [
-                MusicSuggestion(songTitle: "Can't Stop the Feeling", artist: "Justin Timberlake", reason: "Run-ready rhythm for steady Zone 3 tempo.", mood: .energetic, confidence: 0.7),
-                MusicSuggestion(songTitle: "Shake It Off", artist: "Taylor Swift", reason: "Upbeat, rhythmic pop for controlled moderate work.", mood: .upbeat, confidence: 0.7),
-                MusicSuggestion(songTitle: "Feel It Still", artist: "Portugal. The Man", reason: "Compact groove that supports a steady tempo.", mood: .energetic, confidence: 0.7)
-            ],
-            .zone4: [
-                MusicSuggestion(songTitle: "Uptown Funk", artist: "Mark Ronson", reason: "Driving, forceful groove for threshold work.", mood: .energetic, confidence: 0.7),
-                MusicSuggestion(songTitle: "Eye of the Tiger", artist: "Survivor", reason: "Classic power song for controlled hard running.", mood: .motivational, confidence: 0.7),
-                MusicSuggestion(songTitle: "Stronger", artist: "Kanye West", reason: "Driving beat for high-zone effort.", mood: .intense, confidence: 0.7)
-            ],
-            .zone5: [
-                MusicSuggestion(songTitle: "Lose Yourself", artist: "Eminem", reason: "Intense motivation for short peak intervals.", mood: .intense, confidence: 0.7),
-                MusicSuggestion(songTitle: "Till I Collapse", artist: "Eminem", reason: "Explosive, controlled intensity for brief Zone 5 work.", mood: .intense, confidence: 0.7),
-                MusicSuggestion(songTitle: "Titanium", artist: "David Guetta", reason: "High-energy peak-effort track with a strong hook.", mood: .intense, confidence: 0.7)
-            ]
-        ]
-        return suggestions[intensity] ?? []
-    }
-
     static let fallbackMotivationalSpeeches: [String] = [
         "Let's crush this workout! Your body is ready, your mind is strong. Time to run!",
         "Today's the day you prove what you're made of. Every step counts. Let's go!",

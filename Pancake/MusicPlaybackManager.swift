@@ -111,11 +111,13 @@ final class MusicPlaybackManager: ObservableObject {
             return nil
         }
 
-        let fallbackSuggestion = aiService.fallbackSuggestion(
+        guard let fallbackSuggestion = aiService.fallbackSuggestion(
             preferences: preferences,
             intensity: intensity,
             avoiding: avoidedSongKeys
-        ).cleanedTitle()
+        )?.cleanedTitle() else {
+            return nil
+        }
 
         guard !avoidedSongKeys.contains(fallbackSuggestion.sessionSongKey) else {
             return nil

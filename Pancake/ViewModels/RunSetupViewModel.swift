@@ -23,6 +23,12 @@ final class RunSetupViewModel: ObservableObject {
     private func setupBindings() {
         watchConnectivity.$lastError
             .assign(to: &$error)
+        watchConnectivity.objectWillChange
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+        musicCoordinator.objectWillChange
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
         
         // Forward changes from runPlanViewModel to trigger UI updates
         runPlanViewModel.$segments
@@ -104,22 +110,28 @@ final class RunSetupViewModel: ObservableObject {
         }
 
         isStartingRun = true
+        let plan = segments
+        Task { [weak self] in
+            guard let self else { return }
+            defer {
+                self.showingWatchAlert = true
+                self.isStartingRun = false
+            }
+            do {
+                try await self.watchConnectivity.sendRunPlan(plan)
+                self.musicCoordinator.setPendingRunPlan(plan)
+            } catch {
+                self.watchAlertMessage = "Couldn't send the run plan: \(error.localizedDescription)"
+                return
+            }
 
-        // Store the pending segments so optional suggestions have workout context.
-        musicCoordinator.setPendingRunPlan(segments)
-
-        // Send the plan to the watch companion. Music remains optional.
-        watchConnectivity.sendRunPlan(segments)
-
-        // Handle response
-        if let error = watchConnectivity.lastError {
-            watchAlertMessage = "Error: \(error.localizedDescription)"
-        } else {
-            watchAlertMessage = "Run plan sent to your watch. Open Pancake there and start the workout. You can request a music suggestion during the run."
+            do {
+                try await HealthKitManager.shared.startWatchApp()
+                self.watchAlertMessage = "Pancake has been opened on your watch. Your plan will appear there — tap Start Run when you're ready."
+            } catch {
+                self.watchAlertMessage = "Your plan is saved for the watch, but Pancake couldn't open automatically: \(error.localizedDescription). Open Pancake on your watch to start."
+            }
         }
-
-        showingWatchAlert = true
-        isStartingRun = false
     }
     
     func dismissAlert() {

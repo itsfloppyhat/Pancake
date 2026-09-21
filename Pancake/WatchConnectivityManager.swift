@@ -44,8 +44,9 @@ final class WatchConnectivityManager: ObservableObject {
             .assign(to: &$lastError)
     }
     
-    func sendRunPlan(_ segments: [RunSegment]) {
-        wrapper.sendRunPlan(segments)
+    @MainActor
+    func sendRunPlan(_ segments: [RunSegment]) async throws {
+        try await wrapper.sendRunPlan(segments)
     }
     
     func requestStartRun() {
@@ -68,6 +69,7 @@ enum WatchConnectivityError: LocalizedError {
     case watchAppNotInstalled
     case watchNotReachable
     case encodingFailed
+    case sessionNotReady
     
     var errorDescription: String? {
         switch self {
@@ -81,6 +83,8 @@ enum WatchConnectivityError: LocalizedError {
             return "Watch is not reachable"
         case .encodingFailed:
             return "Failed to encode run plan data"
+        case .sessionNotReady:
+            return "Watch connection is still starting. Please try sending the plan again."
         }
     }
 }

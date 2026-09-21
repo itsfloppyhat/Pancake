@@ -4,6 +4,7 @@ struct ContentView: View {
     @StateObject private var healthKit = HealthKitManager.shared
     @StateObject private var workoutManager = WorkoutSessionManager.shared
     @StateObject private var watchConnectivity = WatchConnectivityManager.shared
+    @StateObject private var launchCoordinator = WatchWorkoutLaunchCoordinator.shared
 
     @State private var showWorkoutProgress = false
     @State private var isStartAttemptActive = false
@@ -28,13 +29,14 @@ struct ContentView: View {
                     WaitingForPlanView(
                         isReachable: watchConnectivity.isReachable,
                         isStarting: workoutManager.isStarting,
+                        isAwaitingPlanFromPhone: launchCoordinator.wasLaunchedFromPhone,
                         onQuickRun: startQuickRun
                     )
                 }
             }
         }
         .overlay {
-            if showWorkoutProgress {
+            if showWorkoutProgress || workoutManager.isRunning || workoutManager.completedSummary != nil {
                 WorkoutProgressView(manager: workoutManager) {
                     showWorkoutProgress = false
                 }
@@ -44,6 +46,11 @@ struct ContentView: View {
                 StartingWorkoutView()
                     .background(Color.black)
                     .ignoresSafeArea()
+            }
+        }
+        .onChange(of: watchConnectivity.hasReceivedRunPlan) { _, hasPlan in
+            if hasPlan {
+                launchCoordinator.clearLaunchFromPhone()
             }
         }
         .onChange(of: workoutManager.isRunning) { _, isRunning in
@@ -56,10 +63,17 @@ struct ContentView: View {
 
             isStartAttemptActive = false
             startErrorMessage = nil
+            launchCoordinator.clearLaunchFromPhone()
 
             if !hasSentWorkoutStarted {
                 watchConnectivity.clearReceivedRunPlan()
-                WatchConnectivityManager.shared.sendWorkoutStarted()
+                if let runID = workoutManager.activeRunID, let startedAt = workoutManager.activeRunStartedAt {
+                    WatchConnectivityManager.shared.sendWorkoutStarted(
+                        runID: runID,
+                        startedAt: startedAt,
+                        segments: workoutManager.plannedSegments
+                    )
+                }
                 hasSentWorkoutStarted = true
             }
 
@@ -181,8 +195,37 @@ private enum DebugWatchSimulatorRunController {
         PancakeSimulatorLog("PANCAKE_SIM: Watch requested next song")
 
         try? await Task.sleep(nanoseconds: 16_000_000_000)
-        WatchConnectivityManager.shared.sendMusicControl("next")
-        PancakeSimulatorLog("PANCAKE_SIM: Watch requested next song")
+        guard let interval = IntervalNotificationManager.shared.currentInterval else {
+            PancakeSimulatorLog("PANCAKE_SIM: Missing interval music prompt")
+            return
+        }
+        IntervalNotificationManager.shared.nextSong(for: interval)
+        for _ in 0..<20 {
+            guard IntervalNotificationManager.shared.isSendingControl else { break }
+            try? await Task.sleep(nanoseconds: 500_000_000)
+        }
+        guard !IntervalNotificationManager.shared.isSendingControl,
+              IntervalNotificationManager.shared.musicControlError == nil,
+              IntervalNotificationManager.shared.currentInterval == nil else {
+            PancakeSimulatorLog("PANCAKE_SIM: Interval music action failed")
+            return
+        }
+        PancakeSimulatorLog("PANCAKE_SIM: Watch interval music action acknowledged")
+
+        // Bypass the watch's own stale-action guard to also exercise the phone's
+        // rejection path. A rejected old notification must not skip another song.
+        for _ in 0..<120 {
+            if WorkoutSessionManager.shared.currentSegmentIndex > interval.segmentIndex { break }
+            try? await Task.sleep(nanoseconds: 500_000_000)
+        }
+        try? await Task.sleep(nanoseconds: 1_000_000_000)
+        WatchConnectivityManager.shared.sendIntervalMusicControl("next", interval: interval) { error in
+            if (error as NSError?)?.code == 2 {
+                PancakeSimulatorLog("PANCAKE_SIM: Stale interval music action rejected")
+            } else {
+                PancakeSimulatorLog("PANCAKE_SIM: Stale interval music action was not rejected correctly")
+            }
+        }
     }
 
     private static func waitForRunPlan() async -> Bool {
@@ -240,6 +283,7 @@ struct WatchHealthSetupView: View {
 struct WaitingForPlanView: View {
     let isReachable: Bool
     let isStarting: Bool
+    var isAwaitingPlanFromPhone: Bool = false
     let onQuickRun: () -> Void
 
     var body: some View {
@@ -249,10 +293,19 @@ struct WaitingForPlanView: View {
                     .font(.system(size: 32))
                     .foregroundStyle(.blue)
 
-                Text("Open Pancake on iPhone to plan your run")
-                    .font(.footnote)
-                    .multilineTextAlignment(.center)
+                if isAwaitingPlanFromPhone {
+                    HStack(spacing: 6) {
+                        ProgressView()
+                        Text("Getting your run plan…")
+                            .font(.footnote)
+                    }
                     .padding(.horizontal)
+                } else {
+                    Text("Open Pancake on iPhone to plan your run")
+                        .font(.footnote)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal)
+                }
 
                 // Connectivity status
                 HStack(spacing: 6) {

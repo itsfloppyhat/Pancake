@@ -9,6 +9,7 @@ final class HistoryViewModel: ObservableObject {
     @Published var error: Error?
     @Published var isImportingFromHealthKit: Bool = false
     @Published var importResult: String?
+    @Published var persistenceError: String?
     
     private let runHistoryStore = RunHistoryStore.shared
     private let healthKitManager = HealthKitManager.shared
@@ -21,6 +22,8 @@ final class HistoryViewModel: ObservableObject {
     private func setupBindings() {
         runHistoryStore.$events
             .assign(to: &$events)
+        runHistoryStore.$persistenceError
+            .assign(to: &$persistenceError)
     }
     
     // MARK: - Computed Properties
@@ -58,7 +61,7 @@ final class HistoryViewModel: ObservableObject {
     }
     
     func refreshHistory() {
-        // The history store automatically loads from UserDefaults
+        // The history store loads its durable local file on initialization
         // This method can be used for future network sync if needed
     }
     

@@ -561,6 +561,16 @@ struct HistoryView: View {
     
     var body: some View {
         List {
+            if let error = viewModel.persistenceError {
+                VStack(alignment: .leading, spacing: 6) {
+                    Label("Run history couldn't be saved", systemImage: "exclamationmark.triangle")
+                        .font(.headline)
+                    Text(error).font(.caption)
+                    Text("Recovery data has been kept where possible. Free up storage and reopen Pancake to retry.")
+                        .font(.caption)
+                }
+                .foregroundStyle(.red)
+            }
             if viewModel.hasEvents {
                 ForEach(viewModel.events) { event in
                     NavigationLink(value: event) {

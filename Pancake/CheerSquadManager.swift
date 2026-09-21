@@ -7,14 +7,14 @@ import UserNotifications
 /// Friends ("Cheer Squad") on CloudKit — no accounts, no server.
 ///
 /// Design:
-/// - The runner owns a private custom zone shared zone-wide via one `CKShare`
-///   invite link. Supporters who open the link join as participants.
+/// - The runner owns a private custom zone shared with explicitly invited
+///   iCloud participants. Forwarding a link does not grant access.
 /// - `SquadInfo` and `RunStatus` live at fixed record names in that zone, so
 ///   both sides fetch them directly without needing queryable indexes.
-/// - On run start the runner also writes an ephemeral `RunAnnouncement` to the
-///   public database (opaque squad UUID + display name only, deleted at run
-///   end). Supporters hold a `CKQuerySubscription` on it, so the "gone for a
-///   run" alert is a reliable system-displayed push with no background modes.
+/// - A shared-database subscription sends a content-free background push.
+///   The supporter must successfully read the shared run status before the
+///   app can display an alert. Revoking the share also revokes future alerts.
+///   Background push delivery is best effort, not a real-time guarantee.
 /// - Cheers are records supporters write into the shared zone; the runner
 ///   polls for them while the workout is active (the app is already alive for
 ///   music), so no silent-push plumbing is needed.
@@ -49,7 +49,8 @@ final class CheerSquadManager: ObservableObject {
 
     @Published private(set) var availability: Availability = .unknown
     @Published private(set) var isSharingEnabled = false
-    @Published private(set) var shareURL: URL?
+    @Published private(set) var ownShare: CKShare?
+    @Published private(set) var sharingMigrationNotice: String?
     @Published private(set) var squadMembers: [SquadMember] = []
     @Published private(set) var joinedSquads: [JoinedSquad] = []
     @Published private(set) var recentCheers: [RunCheer] = []
@@ -63,7 +64,7 @@ final class CheerSquadManager: ObservableObject {
 
     static let containerIdentifier = "iCloud.com.Matthew-Lucas.Hello-World.Pancake"
 
-    private lazy var container = CKContainer(identifier: Self.containerIdentifier)
+    lazy var container = CKContainer(identifier: Self.containerIdentifier)
     private var privateDatabase: CKDatabase { container.privateCloudDatabase }
     private var sharedDatabase: CKDatabase { container.sharedCloudDatabase }
     private var publicDatabase: CKDatabase { container.publicCloudDatabase }
@@ -73,19 +74,54 @@ final class CheerSquadManager: ObservableObject {
     }
 
     private var cheerPollTimer: Timer?
-    private var runStartedAt: Date?
+    private var currentRun: CheerRunBroadcast?
+    private var runStartedAt: Date? { currentRun?.isRunning == true ? currentRun?.startedAt : nil }
     private var seenCheerRecordNames: Set<String> = []
-    private var activeAnnouncementRecordID: CKRecord.ID?
+    private var refreshTask: Task<Void, Never>?
+    private var runStatusTask: Task<Void, Never>?
+    private var lastWrittenRun: CheerRunBroadcast?
+    private var notifiedRunIDs: [String: String]
+    private var isCheckingRunAlerts = false
+    private var hasRegisteredSharedSubscription = false
+    private var hasRemovedLegacySubscriptions = false
+    private var currentAccountRecordName: String?
+    private var legacySquadIDs: Set<String> = []
 
     private let settingsKey = "CheerSquadManager.settings"
     private let squadIDKey = "CheerSquadManager.squadID"
+    private let currentRunKey = "CheerSquadManager.currentRun"
+    private let notifiedRunsKey = "CheerSquadManager.notifiedRuns"
+    private let privateInvitationsKey = "CheerSquadManager.needsPrivateInvitations"
+    private static let sharedSubscriptionID = "cheer-shared-run-status-v2"
     private static let cheerPollInterval: TimeInterval = 20
+
+    private static var isSimulatedRun: Bool {
+        #if DEBUG
+        let process = ProcessInfo.processInfo
+        return process.arguments.contains("--pancake-simulated-run") ||
+            process.environment["PANCAKE_SIMULATED_RUN"] == "1"
+        #else
+        return false
+        #endif
+    }
 
     private init() {
         settings = Self.loadSettings(key: settingsKey)
+        notifiedRunIDs = UserDefaults.standard.dictionary(forKey: notifiedRunsKey) as? [String: String] ?? [:]
+        if let data = UserDefaults.standard.data(forKey: currentRunKey) {
+            currentRun = try? JSONDecoder().decode(CheerRunBroadcast.self, from: data)
+        }
+        if let legacyID = UserDefaults.standard.string(forKey: squadIDKey) {
+            legacySquadIDs.insert(legacyID)
+        }
+        if UserDefaults.standard.bool(forKey: privateInvitationsKey) {
+            sharingMigrationNotice = Self.privateInvitationsMessage
+        }
     }
 
-    /// Opaque identifier used only for public run announcements.
+    private static let privateInvitationsMessage = "Your old anyone-with-link invitation has been retired. Invite your supporters again using Invite and manage supporters; only the iCloud accounts you choose can join."
+
+    /// Retained in the private squad info for compatibility and legacy cleanup.
     private var squadID: String {
         if let stored = UserDefaults.standard.string(forKey: squadIDKey) {
             return stored
@@ -104,21 +140,54 @@ final class CheerSquadManager: ObservableObject {
     // MARK: - Refresh
 
     func refresh() async {
+        if let refreshTask {
+            await refreshTask.value
+            return
+        }
+        let task = Task { await performRefresh() }
+        refreshTask = task
+        await task.value
+        refreshTask = nil
+    }
+
+    private func performRefresh() async {
         isBusy = true
         defer { isBusy = false }
 
         await refreshAccountStatus()
-        guard availability == .available else { return }
+        guard availability == .available else {
+            clearOwnShare()
+            joinedSquads = []
+            hasRegisteredSharedSubscription = false
+            hasRemovedLegacySubscriptions = false
+            return
+        }
 
         await refreshOwnSquad()
-        await refreshJoinedSquads()
         await refreshRunAlertAuthorization()
+        _ = await refreshJoinedSquads()
+        await registerRunAlertSubscription()
+        reconcilePersistedRun()
+        await removeLegacyPublicData()
     }
 
     private func refreshAccountStatus() async {
+        // The unsigned simulator harness cannot initialize CKContainer. Keep
+        // its synthetic runs local even when the simulator has an iCloud login.
+        guard !Self.isSimulatedRun else {
+            availability = .unavailable("Cheer Squad is unavailable during simulated runs.")
+            return
+        }
         do {
             switch try await container.accountStatus() {
             case .available:
+                let accountName = try await container.userRecordID().recordName
+                if currentAccountRecordName != accountName {
+                    hasRegisteredSharedSubscription = false
+                    hasRemovedLegacySubscriptions = false
+                    lastWrittenRun = nil
+                    currentAccountRecordName = accountName
+                }
                 availability = .available
             case .noAccount:
                 availability = .noAccount
@@ -143,20 +212,26 @@ final class CheerSquadManager: ObservableObject {
             let record = try await privateDatabase.record(for: shareRecordID)
 
             if let share = record as? CKShare {
-                applyOwnShare(share)
+                // Saving .none removes legacy public participants. Do not
+                // advertise an insecure share if this migration fails.
+                applyOwnShare(try await ensurePrivateShare(share))
+                let infoID = CKRecord.ID(recordName: CheerSquadSchema.squadInfoRecordName, zoneID: ownZoneID)
+                if let info = try? await privateDatabase.record(for: infoID),
+                   let legacyID = info[CheerSquadSchema.squadIDField] as? String {
+                    legacySquadIDs.insert(legacyID)
+                }
             }
         } catch let error as CKError where error.code == .unknownItem || error.code == .zoneNotFound {
-            isSharingEnabled = false
-            shareURL = nil
-            squadMembers = []
+            clearOwnShare()
         } catch {
+            clearOwnShare()
             recordError(error)
         }
     }
 
     private func applyOwnShare(_ share: CKShare) {
         isSharingEnabled = true
-        shareURL = share.url
+        ownShare = share
         squadMembers = share.participants.map { participant in
             SquadMember(
                 id: participant.participantID.description,
@@ -165,6 +240,39 @@ final class CheerSquadManager: ObservableObject {
                 acceptanceStatus: participant.acceptanceStatus
             )
         }
+    }
+
+    private func clearOwnShare() {
+        isSharingEnabled = false
+        ownShare = nil
+        squadMembers = []
+        isBroadcastingRun = false
+        stopCheerPolling()
+    }
+
+    private func ensurePrivateShare(_ share: CKShare) async throws -> CKShare {
+        guard share.publicPermission != .none else { return share }
+        share.publicPermission = .none
+        guard let saved = try await privateDatabase.save(share) as? CKShare else {
+            throw CKError(.internalError)
+        }
+        UserDefaults.standard.set(true, forKey: privateInvitationsKey)
+        sharingMigrationNotice = Self.privateInvitationsMessage
+        return saved
+    }
+
+    func sharingControllerDidSave() async {
+        await refresh()
+        if squadMembers.contains(where: { !$0.isOwner }) {
+            UserDefaults.standard.set(false, forKey: privateInvitationsKey)
+            sharingMigrationNotice = nil
+        }
+    }
+
+    func sharingControllerDidStopSharing() async {
+        clearOwnShare()
+        lastWrittenRun = nil
+        await refresh()
     }
 
     private static func displayName(for participant: CKShare.Participant) -> String {
@@ -180,7 +288,8 @@ final class CheerSquadManager: ObservableObject {
         return participant.role == .owner ? "You" : "Squad member"
     }
 
-    private func refreshJoinedSquads() async {
+    @discardableResult
+    private func refreshJoinedSquads() async -> Bool {
         do {
             let zones = try await sharedDatabase.allRecordZones()
             var squads: [JoinedSquad] = []
@@ -191,10 +300,13 @@ final class CheerSquadManager: ObservableObject {
             }
 
             joinedSquads = squads.sorted { $0.runnerName < $1.runnerName }
+            return true
         } catch let error as CKError where error.code == .zoneNotFound {
             joinedSquads = []
+            return true
         } catch {
             recordError(error)
+            return false
         }
     }
 
@@ -208,10 +320,14 @@ final class CheerSquadManager: ObservableObject {
 
             var isRunning = false
             var startedAt: Date?
+            var runID: String?
+            var alertsEnabled = false
             let statusID = CKRecord.ID(recordName: CheerSquadSchema.runStatusRecordName, zoneID: zoneID)
             if let status = try? await sharedDatabase.record(for: statusID) {
                 isRunning = (status[CheerSquadSchema.statusField] as? String) == CheerSquadSchema.statusRunning
                 startedAt = status[CheerSquadSchema.startedAtField] as? Date
+                runID = status[CheerSquadSchema.runIDField] as? String
+                alertsEnabled = (status[CheerSquadSchema.alertsEnabledField] as? NSNumber)?.boolValue ?? false
             }
 
             return JoinedSquad(
@@ -220,7 +336,9 @@ final class CheerSquadManager: ObservableObject {
                 squadID: squadID,
                 zoneID: zoneID,
                 isRunningNow: isRunning,
-                runStartedAt: startedAt
+                runStartedAt: startedAt,
+                runID: runID,
+                runAlertsEnabled: alertsEnabled
             )
         } catch {
             return nil
@@ -231,35 +349,41 @@ final class CheerSquadManager: ObservableObject {
 
     /// Creates the shared zone and invite link on first use.
     func enableSharing() async {
+        await refreshAccountStatus()
         guard availability == .available else { return }
         isBusy = true
         defer { isBusy = false }
 
         do {
             let zone = CKRecordZone(zoneName: CheerSquadSchema.zoneName)
-            _ = try await privateDatabase.modifyRecordZones(saving: [zone], deleting: [])
+            _ = try await privateDatabase.save(zone)
 
             let infoID = CKRecord.ID(recordName: CheerSquadSchema.squadInfoRecordName, zoneID: ownZoneID)
             let info: CKRecord
-            if let existing = try? await privateDatabase.record(for: infoID) {
-                info = existing
-            } else {
+            do {
+                info = try await privateDatabase.record(for: infoID)
+            } catch let error as CKError where error.code == .unknownItem {
                 info = CKRecord(recordType: CheerSquadSchema.squadInfoRecordType, recordID: infoID)
             }
-            info[CheerSquadSchema.squadIDField] = squadID
+            // Preserve the existing ID so every old public record can be
+            // removed even after an app reinstall generated a new local ID.
+            let existingID = info[CheerSquadSchema.squadIDField] as? String
+            if let existingID { legacySquadIDs.insert(existingID) }
+            info[CheerSquadSchema.squadIDField] = existingID ?? squadID
             info[CheerSquadSchema.runnerNameField] = runnerDisplayName
 
-            let share = try await existingOrNewZoneShare()
+            let share = try await ensurePrivateShare(existingOrNewZoneShare())
             share[CKShare.SystemFieldKey.title] = "\(runnerDisplayName)'s Cheer Squad" as CKRecordValue
-            share.publicPermission = .readWrite
+            share.publicPermission = .none
 
             let results = try await privateDatabase.modifyRecords(saving: [info, share], deleting: [])
-            for (_, result) in results.saveResults {
-                if case .success(let saved) = result, let savedShare = saved as? CKShare {
+            for result in results.saveResults.values {
+                if let savedShare = try result.get() as? CKShare {
                     applyOwnShare(savedShare)
                 }
             }
             lastErrorMessage = nil
+            reconcilePersistedRun()
         } catch {
             recordError(error)
         }
@@ -286,19 +410,18 @@ final class CheerSquadManager: ObservableObject {
 
         do {
             let shareRecordID = CKRecord.ID(recordName: CKRecordNameZoneWideShare, zoneID: ownZoneID)
-            guard let share = try await privateDatabase.record(for: shareRecordID) as? CKShare else { return }
+            guard let fetchedShare = try await privateDatabase.record(for: shareRecordID) as? CKShare else { return }
+            let share = try await ensurePrivateShare(fetchedShare)
 
             guard let participant = share.participants.first(where: {
                 $0.participantID.description == member.id && $0.role != .owner
             }) else { return }
 
             share.removeParticipant(participant)
-            let results = try await privateDatabase.modifyRecords(saving: [share], deleting: [])
-            for (_, result) in results.saveResults {
-                if case .success(let saved) = result, let savedShare = saved as? CKShare {
-                    applyOwnShare(savedShare)
-                }
+            if let saved = try await privateDatabase.save(share) as? CKShare {
+                applyOwnShare(saved)
             }
+            lastErrorMessage = nil
         } catch {
             recordError(error)
         }
@@ -311,18 +434,21 @@ final class CheerSquadManager: ObservableObject {
         defer { isBusy = false }
 
         do {
+            guard metadata.containerIdentifier == Self.containerIdentifier else { return }
             _ = try await container.accept(metadata)
-            await refreshJoinedSquads()
-            await registerRunAlertSubscriptions()
+            await refreshAccountStatus()
+            _ = await refreshJoinedSquads()
+            await refreshRunAlertAuthorization()
+            await registerRunAlertSubscription()
+            await removeLegacyPublicData()
             lastErrorMessage = nil
         } catch {
             recordError(error)
         }
     }
 
-    /// Asks for notification permission and subscribes to run-start
-    /// announcements for every joined squad. The push is displayed by the
-    /// system, so no background modes are involved.
+    /// Background pushes carry no runner information. A successful shared
+    /// record read is required before showing a local run-start notification.
     func enableRunAlerts() async {
         do {
             let granted = try await UNUserNotificationCenter.current()
@@ -331,7 +457,7 @@ final class CheerSquadManager: ObservableObject {
             guard granted else { return }
 
             UIApplication.shared.registerForRemoteNotifications()
-            await registerRunAlertSubscriptions()
+            await registerRunAlertSubscription()
         } catch {
             recordError(error)
         }
@@ -345,116 +471,226 @@ final class CheerSquadManager: ObservableObject {
         }
     }
 
-    private func registerRunAlertSubscriptions() async {
-        for squad in joinedSquads {
-            let subscriptionID = "run-start-\(squad.squadID)"
-            let predicate = NSPredicate(format: "%K == %@", CheerSquadSchema.announcementSquadIDField, squad.squadID)
-            let subscription = CKQuerySubscription(
-                recordType: CheerSquadSchema.announcementRecordType,
-                predicate: predicate,
-                subscriptionID: subscriptionID,
-                options: [.firesOnRecordCreation]
-            )
+    private func registerRunAlertSubscription() async {
+        guard availability == .available, runAlertsAuthorized,
+              !hasRegisteredSharedSubscription else { return }
+        let subscription = CKDatabaseSubscription(subscriptionID: Self.sharedSubscriptionID)
+        subscription.recordType = CheerSquadSchema.runStatusRecordType
+        let notificationInfo = CKSubscription.NotificationInfo()
+        notificationInfo.shouldSendContentAvailable = true
+        subscription.notificationInfo = notificationInfo
 
-            let notificationInfo = CKSubscription.NotificationInfo()
-            notificationInfo.title = "\(squad.runnerName) is out for a run"
-            notificationInfo.alertBody = "Open Pancake to send a cheer they'll hear mid-run."
-            notificationInfo.soundName = "default"
-            subscription.notificationInfo = notificationInfo
-
+        do {
             do {
-                _ = try await publicDatabase.save(subscription)
-            } catch let error as CKError where error.code == .serverRejectedRequest {
-                // Subscription already exists — fine.
+                let existing = try await sharedDatabase.subscription(for: Self.sharedSubscriptionID)
+                if let existing = existing as? CKDatabaseSubscription,
+                   existing.recordType == CheerSquadSchema.runStatusRecordType,
+                   existing.notificationInfo?.shouldSendContentAvailable == true {
+                    hasRegisteredSharedSubscription = true
+                    return
+                }
+            } catch let error as CKError where error.code == .unknownItem {
+                // First run for this account; create the subscription below.
+            }
+            _ = try await sharedDatabase.save(subscription)
+            hasRegisteredSharedSubscription = true
+        } catch {
+            recordError(error)
+        }
+    }
+
+    func handleRemoteNotification(_ userInfo: [AnyHashable: Any]) async -> UIBackgroundFetchResult {
+        guard let notification = CKNotification(fromRemoteNotificationDictionary: userInfo),
+              notification.containerIdentifier == Self.containerIdentifier,
+              notification.subscriptionID == Self.sharedSubscriptionID,
+              let databaseNotification = notification as? CKDatabaseNotification,
+              databaseNotification.databaseScope == .shared else { return .noData }
+
+        // Never turn cached joinedSquads or a public push payload into alerts.
+        // A revoked membership must fail its fresh read before any alert exists.
+        guard !isCheckingRunAlerts else { return .noData }
+        isCheckingRunAlerts = true
+        defer { isCheckingRunAlerts = false }
+        await refreshAccountStatus()
+        guard availability == .available else { return .failed }
+        await refreshRunAlertAuthorization()
+        guard runAlertsAuthorized else { return .noData }
+        guard await refreshJoinedSquads() else { return .failed }
+
+        var delivered = false
+        for squad in joinedSquads {
+            guard CheerRunAlertPolicy.shouldNotify(
+                runID: squad.runID,
+                startedAt: squad.runStartedAt,
+                isRunning: squad.isRunningNow,
+                alertsEnabled: squad.runAlertsEnabled,
+                lastNotifiedRunID: notifiedRunIDs[squad.id]
+            ), let runID = squad.runID else { continue }
+
+            let content = UNMutableNotificationContent()
+            content.title = "\(squad.runnerName) is out for a run"
+            content.body = "Open Pancake to send a cheer they'll hear mid-run."
+            content.sound = .default
+            let request = UNNotificationRequest(
+                identifier: "cheer-run-\(squad.id)-\(runID)",
+                content: content,
+                trigger: nil
+            )
+            do {
+                try await UNUserNotificationCenter.current().add(request)
+                notifiedRunIDs[squad.id] = runID
+                UserDefaults.standard.set(notifiedRunIDs, forKey: notifiedRunsKey)
+                delivered = true
+            } catch {
+                recordError(error)
+            }
+        }
+        return delivered ? .newData : .noData
+    }
+
+    // MARK: - Run broadcasting (runner side)
+
+    /// Called by the workout coordinator when a run starts.
+    func workoutDidStart(startedAt: Date = Date()) {
+        #if DEBUG
+        // Sandbox runs must never notify real squad members.
+        if RunSandboxDriver.isSandboxRunActive || Self.isSimulatedRun { return }
+        #endif
+
+        if currentRun?.isRunning != true || currentRun?.startedAt != startedAt {
+            currentRun = CheerRunBroadcast(
+                id: UUID().uuidString,
+                startedAt: startedAt,
+                isRunning: true,
+                alertsEnabled: settings.alertSquadOnRunStart
+            )
+        }
+        persistCurrentRun()
+        seenCheerRecordNames = []
+        recentCheers = []
+        enqueueRunStatus()
+    }
+
+    /// Called by the workout coordinator when the run ends.
+    func workoutDidEnd() {
+        guard !Self.isSimulatedRun else { return }
+        stopCheerPolling()
+        isBroadcastingRun = false
+        guard var run = currentRun else { return }
+        run.isRunning = false
+        currentRun = run
+        persistCurrentRun()
+        enqueueRunStatus()
+    }
+
+    private func persistCurrentRun() {
+        guard let currentRun, let data = try? JSONEncoder().encode(currentRun) else { return }
+        UserDefaults.standard.set(data, forKey: currentRunKey)
+    }
+
+    private func reconcilePersistedRun() {
+        guard let run = currentRun else { return }
+        if run.isRunning {
+            let snapshot = ActiveRunStateStore.shared.snapshot
+            if snapshot == nil || snapshot.map({ RunEventRecoveryPolicy.isStale($0) }) == true {
+                workoutDidEnd()
+                return
+            }
+        }
+        enqueueRunStatus()
+    }
+
+    /// Chain writes across actor suspension points. A delayed start can never
+    /// overwrite an end or a newer run, and failed writes stay pending on disk.
+    private func enqueueRunStatus() {
+        guard let desiredRun = currentRun, desiredRun != lastWrittenRun else { return }
+        let previous = runStatusTask
+        runStatusTask = Task {
+            await previous?.value
+            guard currentRun == desiredRun, lastWrittenRun != desiredRun else { return }
+            await refreshAccountStatus()
+            guard availability == .available else { return }
+            await refreshOwnSquad()
+            guard isSharingEnabled, currentRun == desiredRun else { return }
+            do {
+                try await writeRunStatus(desiredRun)
+                lastWrittenRun = desiredRun
+                if currentRun == desiredRun, desiredRun.isRunning {
+                    isBroadcastingRun = true
+                    startCheerPolling()
+                }
             } catch {
                 recordError(error)
             }
         }
     }
 
-    // MARK: - Run broadcasting (runner side)
+    private func writeRunStatus(_ run: CheerRunBroadcast) async throws {
+        let statusID = CKRecord.ID(recordName: CheerSquadSchema.runStatusRecordName, zoneID: ownZoneID)
+        let record: CKRecord
+        do {
+            record = try await privateDatabase.record(for: statusID)
+        } catch let error as CKError where error.code == .unknownItem {
+            record = CKRecord(recordType: CheerSquadSchema.runStatusRecordType, recordID: statusID)
+        }
+        record[CheerSquadSchema.statusField] = run.isRunning ? CheerSquadSchema.statusRunning : CheerSquadSchema.statusEnded
+        record[CheerSquadSchema.startedAtField] = run.startedAt
+        record[CheerSquadSchema.runIDField] = run.id
+        record[CheerSquadSchema.alertsEnabledField] = NSNumber(value: run.alertsEnabled)
 
-    /// Called by the workout coordinator when a run starts.
-    func workoutDidStart() {
-        #if DEBUG
-        // Sandbox runs must never notify real squad members.
-        if RunSandboxDriver.isSandboxRunActive { return }
-        #endif
+        let results = try await privateDatabase.modifyRecords(saving: [record], deleting: [], savePolicy: .changedKeys)
+        guard let result = results.saveResults[statusID] else { throw CKError(.internalError) }
+        _ = try result.get()
+    }
 
-        runStartedAt = Date()
-        seenCheerRecordNames = []
-        recentCheers = []
+    // MARK: - Migration from public run announcements
 
-        guard availability == .available, isSharingEnabled else { return }
-
-        isBroadcastingRun = true
-        startCheerPolling()
-
-        Task {
-            await writeRunStatus(CheerSquadSchema.statusRunning)
-            if settings.alertSquadOnRunStart {
-                await publishRunAnnouncement()
+    private func removeLegacyPublicData() async {
+        // The info record can outlive its share and the app installation.
+        let infoID = CKRecord.ID(recordName: CheerSquadSchema.squadInfoRecordName, zoneID: ownZoneID)
+        if let info = try? await privateDatabase.record(for: infoID),
+           let legacyID = info[CheerSquadSchema.squadIDField] as? String {
+            legacySquadIDs.insert(legacyID)
+        }
+        if !hasRemovedLegacySubscriptions {
+            do {
+                let subscriptions = try await publicDatabase.allSubscriptions()
+                for subscription in subscriptions where subscription.subscriptionID.hasPrefix("run-start-") {
+                    _ = try await publicDatabase.deleteSubscription(withID: subscription.subscriptionID)
+                }
+                hasRemovedLegacySubscriptions = true
+            } catch {
+                // Retry next refresh. Current code never creates public alerts.
+                print("Cheer Squad legacy subscription cleanup will retry.")
             }
         }
-    }
 
-    /// Called by the workout coordinator when the run ends.
-    func workoutDidEnd() {
-        stopCheerPolling()
-        runStartedAt = nil
-
-        guard isBroadcastingRun else { return }
-        isBroadcastingRun = false
-
-        Task {
-            await writeRunStatus(CheerSquadSchema.statusEnded)
-            await removeRunAnnouncement()
-        }
-    }
-
-    private func writeRunStatus(_ status: String) async {
-        do {
-            let statusID = CKRecord.ID(recordName: CheerSquadSchema.runStatusRecordName, zoneID: ownZoneID)
-            let record: CKRecord
-            if let existing = try? await privateDatabase.record(for: statusID) {
-                record = existing
-            } else {
-                record = CKRecord(recordType: CheerSquadSchema.runStatusRecordType, recordID: statusID)
+        for legacyID in legacySquadIDs {
+            do {
+                let query = CKQuery(
+                    recordType: CheerSquadSchema.announcementRecordType,
+                    predicate: NSPredicate(format: "%K == %@", CheerSquadSchema.announcementSquadIDField, legacyID)
+                )
+                var page = try await publicDatabase.records(matching: query, desiredKeys: [])
+                var recordIDs: [CKRecord.ID] = []
+                while true {
+                    for (recordID, result) in page.matchResults {
+                        _ = try result.get()
+                        recordIDs.append(recordID)
+                    }
+                    guard let cursor = page.queryCursor else { break }
+                    page = try await publicDatabase.records(continuingMatchFrom: cursor, desiredKeys: [])
+                }
+                // Finish pagination before deleting so changing the result set
+                // does not invalidate traversal of the remaining old records.
+                for recordID in recordIDs {
+                    _ = try await publicDatabase.deleteRecord(withID: recordID)
+                }
+            } catch {
+                // Old deployments may lack the record type/index. Keep the ID
+                // and retry; never claim an unsuccessful cleanup was complete.
+                print("Cheer Squad legacy announcement cleanup will retry.")
             }
-            record[CheerSquadSchema.statusField] = status
-            record[CheerSquadSchema.startedAtField] = runStartedAt ?? Date()
-
-            _ = try await privateDatabase.modifyRecords(
-                saving: [record],
-                deleting: [],
-                savePolicy: .changedKeys
-            )
-        } catch {
-            recordError(error)
-        }
-    }
-
-    private func publishRunAnnouncement() async {
-        do {
-            let record = CKRecord(recordType: CheerSquadSchema.announcementRecordType)
-            record[CheerSquadSchema.announcementSquadIDField] = squadID
-            record[CheerSquadSchema.announcementRunnerNameField] = runnerDisplayName
-
-            let saved = try await publicDatabase.save(record)
-            activeAnnouncementRecordID = saved.recordID
-        } catch {
-            recordError(error)
-        }
-    }
-
-    private func removeRunAnnouncement() async {
-        guard let recordID = activeAnnouncementRecordID else { return }
-        activeAnnouncementRecordID = nil
-
-        do {
-            _ = try await publicDatabase.deleteRecord(withID: recordID)
-        } catch {
-            // Announcement cleanup is best effort; records are opaque.
         }
     }
 

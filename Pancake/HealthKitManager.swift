@@ -138,6 +138,61 @@ final class HealthKitManager: ObservableObject {
         return status
     }
     
+    // MARK: - Watch App Launch
+
+    /// `startWatchApp(with:)` only launches the companion when the iPhone app is
+    /// authorized to *write* workouts. Pancake never saves workouts from the phone —
+    /// the watch owns that — so this permission is requested on its own, separate
+    /// from `shareTypes`, to keep a denial from breaking run-history import.
+    private var watchLaunchShareTypes: Set<HKSampleType> {
+        [HKObjectType.workoutType()]
+    }
+
+    var isWatchLaunchAuthorized: Bool {
+        healthStore.authorizationStatus(for: HKObjectType.workoutType()) == .sharingAuthorized
+    }
+
+    @discardableResult
+    func requestWatchLaunchAuthorization() async -> Bool {
+        guard HKHealthStore.isHealthDataAvailable() else { return false }
+
+        do {
+            try await healthStore.requestAuthorization(toShare: watchLaunchShareTypes, read: [])
+        } catch {
+            return false
+        }
+
+        return isWatchLaunchAuthorized
+    }
+
+    /// Opens the Pancake watch app on the paired watch, ready for the run plan the
+    /// phone just sent. The watch still waits for the runner to tap Start.
+    func startWatchApp() async throws {
+        guard HKHealthStore.isHealthDataAvailable() else {
+            throw HealthKitError.notAvailable
+        }
+
+        guard await requestWatchLaunchAuthorization() else {
+            throw HealthKitError.watchLaunchNotAuthorized
+        }
+
+        let configuration = HKWorkoutConfiguration()
+        configuration.activityType = .running
+        configuration.locationType = .outdoor
+
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            healthStore.startWatchApp(with: configuration) { success, error in
+                if let error = error {
+                    continuation.resume(throwing: error)
+                } else if success {
+                    continuation.resume()
+                } else {
+                    continuation.resume(throwing: HealthKitError.watchLaunchFailed)
+                }
+            }
+        }
+    }
+
     // MARK: - Workout History Import
     
     /// Fetch all running workouts from HealthKit with minimum distance filter
@@ -236,6 +291,8 @@ enum HealthKitError: LocalizedError {
     case notAuthorized
     case missingRequiredShareTypes([String])
     case requestFailed
+    case watchLaunchNotAuthorized
+    case watchLaunchFailed
     
     var errorDescription: String? {
         switch self {
@@ -247,6 +304,10 @@ enum HealthKitError: LocalizedError {
             return "Health needs write access for: \(names.joined(separator: ", "))"
         case .requestFailed:
             return "Failed to request Health access"
+        case .watchLaunchNotAuthorized:
+            return "Health needs permission to start workouts before Pancake can open on your watch"
+        case .watchLaunchFailed:
+            return "Your watch didn't open Pancake"
         }
     }
 }
