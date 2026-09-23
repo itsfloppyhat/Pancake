@@ -135,6 +135,13 @@ private enum DebugSimulatorRunOrchestrator {
         OnboardingManager.shared.completeOnboarding()
         seedSimulatorTasteIfNeeded()
 
+        #if targetEnvironment(simulator)
+        if AdaptiveMixSimulation.usesLocalTransitionDriver {
+            await AdaptiveMixSimulation.runLocalTransitionTest()
+            return
+        }
+        #endif
+
         PancakeSimulatorLog("PANCAKE_SIM: iPhone waiting for paired watch simulator")
         let watchReady = await waitForWatchReadiness()
         if !watchReady {
@@ -165,6 +172,12 @@ private enum DebugSimulatorRunOrchestrator {
     }
 
     private static func simulatedRunSegments() -> [RunSegment] {
+        if ProcessInfo.processInfo.environment["PANCAKE_SIM_TRANSITION_TEST"] == "1" {
+            return [
+                RunSegment(intensity: .zone1, target: .time(seconds: 60)),
+                RunSegment(intensity: .zone5, target: .time(seconds: 60))
+            ]
+        }
         // Scale stretches every segment (e.g. 12 → 20s becomes 4 min) so
         // screenshot runs show realistic countdowns; the validation loop
         // keeps the fast defaults by not setting the variable.

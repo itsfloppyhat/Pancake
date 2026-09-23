@@ -45,7 +45,9 @@ final class WatchConnectivityWrapper: NSObject, ObservableObject {
             "planID": UUID().uuidString,
             "sentAt": Date().timeIntervalSince1970
         ]
-        try session.updateApplicationContext(message)
+        var context = message
+        context[DistanceUnit.preferenceKey] = DistanceUnit.preferred.rawValue
+        try session.updateApplicationContext(context)
         if session.isReachable {
             session.sendMessage(message, replyHandler: nil) { _ in
                 // Reachability can change between the check and actual delivery.
@@ -53,6 +55,20 @@ final class WatchConnectivityWrapper: NSObject, ObservableObject {
             }
         } else {
             session.transferUserInfo(message)
+        }
+    }
+
+    /// Merge preferences into the latest context so changing units never discards a pending plan.
+    func syncDistanceUnit() {
+        guard WCSession.isSupported() else { return }
+        let session = WCSession.default
+        guard session.activationState == .activated, session.isPaired, session.isWatchAppInstalled else { return }
+        var context = session.applicationContext
+        context[DistanceUnit.preferenceKey] = DistanceUnit.preferred.rawValue
+        do {
+            try session.updateApplicationContext(context)
+        } catch {
+            lastError = error
         }
     }
 
@@ -80,6 +96,12 @@ final class WatchConnectivityWrapper: NSObject, ObservableObject {
                 self.lastError = error
             }
         })
+    }
+
+    func acknowledgeRunRoute(_ runID: UUID) -> Bool {
+        guard WCSession.isSupported(), WCSession.default.activationState == .activated else { return false }
+        WCSession.default.transferUserInfo(["type": "runRouteReceived", "runID": runID.uuidString])
+        return true
     }
     
     func sendMessage(_ message: [String: Any], errorHandler: @escaping (Error) -> Void) {
@@ -134,6 +156,18 @@ final class WatchConnectivityWrapper: NSObject, ObservableObject {
 
 // MARK: - WCSessionDelegate
 extension WatchConnectivityWrapper: WCSessionDelegate {
+    func session(_ session: WCSession, didReceive file: WCSessionFile) {
+        guard file.metadata?["type"] as? String == "runRoute" else { return }
+        do {
+            let url = try RunRouteInbox.stage(Data(contentsOf: file.fileURL))
+            Task { @MainActor in
+                WorkoutMusicCoordinator.shared.importRouteArchive(at: url)
+            }
+        } catch {
+            print("Could not receive GPS route: \(error.localizedDescription)")
+        }
+    }
+
     func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) {
         DispatchQueue.main.async {
             if let error = error {
@@ -143,6 +177,12 @@ extension WatchConnectivityWrapper: WCSessionDelegate {
                 self.isWatchPaired = session.isPaired
                 self.isWatchAppInstalled = session.isWatchAppInstalled
                 self.isWatchReachable = session.isReachable
+                if activationState == .activated {
+                    self.syncDistanceUnit()
+                    Task { @MainActor in
+                        for url in RunRouteInbox.pending() { WorkoutMusicCoordinator.shared.importRouteArchive(at: url) }
+                    }
+                }
             }
         }
     }
@@ -171,6 +211,7 @@ extension WatchConnectivityWrapper: WCSessionDelegate {
             self.isWatchPaired = session.isPaired
             self.isWatchAppInstalled = session.isWatchAppInstalled
             self.isWatchReachable = session.isReachable
+            self.syncDistanceUnit()
         }
     }
     
@@ -253,6 +294,8 @@ final class WatchConnectivityWrapper: ObservableObject {
     func sendRunPlan(_ segments: [RunSegment]) async throws {
         throw WatchConnectivityError.notSupported
     }
+
+    func syncDistanceUnit() {}
 
     func requestStartRun() {
         lastError = WatchConnectivityError.notSupported

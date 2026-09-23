@@ -1,9 +1,17 @@
 import SwiftUI
 
 struct IntervalMusicControlsView: View {
+    @AppStorage(DistanceUnit.preferenceKey) private var distanceUnit: DistanceUnit = .kilometers
     let interval: IntervalChangePrompt
     @ObservedObject private var notifications = IntervalNotificationManager.shared
     @ObservedObject private var connectivity = WatchConnectivityManager.shared
+
+    private var targetDescription: String {
+        switch interval.target {
+        case .time(let seconds): return seconds.formattedDuration()
+        case .distance(let meters): return meters.formattedDistanceMeters(unit: distanceUnit)
+        }
+    }
 
     var body: some View {
         ScrollView {
@@ -12,7 +20,7 @@ struct IntervalMusicControlsView: View {
                     .font(.headline)
                     .multilineTextAlignment(.center)
 
-                Text(interval.targetDescription)
+                Text(targetDescription)
                     .font(.caption)
                     .foregroundStyle(.secondary)
 

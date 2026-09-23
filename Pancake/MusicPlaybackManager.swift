@@ -8,6 +8,7 @@ struct ResolvedAdaptiveMixItem {
     let suggestion: MusicSuggestion
     let song: MusicSong
     let catalogSong: Song?
+    let sourceSongKey: String
 }
 
 struct AdaptiveMixCatalogResolutionReport {
@@ -45,11 +46,14 @@ final class MusicPlaybackManager: ObservableObject {
     /// Track last song ID to suppress duplicate nowPlayingItemChanged notifications
     private var lastReportedSongID: String?
     private var adaptiveCatalogSongsByID: [String: Song] = [:]
+    private var adaptiveStartRevision = 0
     private var simulatedAdaptiveQueue: [MusicSong] = []
     private var isSimulatedAdaptivePlaybackActive = false
     private static let simulatedAdaptivePlaybackArgument = "--pancake-simulated-music"
     private static let simulatedAdaptivePlaybackEnvironmentKey = "PANCAKE_SIMULATED_MUSIC"
-    private static let simulatedSongDuration: TimeInterval = 8
+    private static var simulatedSongDuration: TimeInterval {
+        ProcessInfo.processInfo.environment["PANCAKE_SIM_TRANSITION_TEST"] == "1" ? 240 : 8
+    }
     
     var hasLibraryAccess: Bool {
         MPMediaLibrary.authorizationStatus() == .authorized
@@ -237,7 +241,8 @@ final class MusicPlaybackManager: ObservableObject {
                     ResolvedAdaptiveMixItem(
                         suggestion: resolvedSuggestion,
                         song: musicSong(from: catalogSong),
-                        catalogSong: catalogSong
+                        catalogSong: catalogSong,
+                        sourceSongKey: cleanedSuggestion.sessionSongKey
                     )
                 )
             } catch {
@@ -254,9 +259,13 @@ final class MusicPlaybackManager: ObservableObject {
     }
 
     @discardableResult
-    func startAdaptiveMix(with items: [ResolvedAdaptiveMixItem]) async -> Bool {
+    func startAdaptiveMix(with items: [ResolvedAdaptiveMixItem], playImmediately: Bool = true) async -> Bool {
+        invalidatePendingAdaptiveStart()
+        let revision = adaptiveStartRevision
         if isSimulatedAdaptivePlaybackEnabled {
-            return startSimulatedAdaptiveMix(with: items.map(\.song))
+            let started = startSimulatedAdaptiveMix(with: items.map(\.song))
+            if !playImmediately { pause() }
+            return started
         }
 
         guard hasCatalogAccess, !items.isEmpty else {
@@ -282,7 +291,9 @@ final class MusicPlaybackManager: ObservableObject {
 
         do {
             try await adaptiveMusicPlayer.prepareToPlay()
-            try await adaptiveMusicPlayer.play()
+            guard revision == adaptiveStartRevision else { return false }
+            if playImmediately { try await adaptiveMusicPlayer.play() }
+            guard revision == adaptiveStartRevision else { return false }
             isAdaptivePlaybackActive = true
             playbackError = nil
             playbackStateDescription = "adaptive mix playing"
@@ -293,12 +304,33 @@ final class MusicPlaybackManager: ObservableObject {
             // racing it here produced false "could not start" results.
             return true
         } catch {
+            guard revision == adaptiveStartRevision else { return false }
             adaptiveMusicPlayer.stop()
             isAdaptivePlaybackActive = false
             adaptiveUpcomingSongs = []
             updatePlaybackFailure(error, state: "Adaptive Mix playback failed")
             return false
         }
+    }
+
+    func invalidatePendingAdaptiveStart() {
+        adaptiveStartRevision += 1
+    }
+
+    /// Preserve the current song while removing an obsolete zone's buffer.
+    func clearAdaptiveMixUpcoming() {
+        if isSimulatedAdaptivePlaybackActive {
+            simulatedAdaptiveQueue.removeAll()
+            adaptiveUpcomingSongs = []
+            return
+        }
+        guard isAdaptivePlaybackActive, let current = adaptiveMusicPlayer.queue.currentEntry else { return }
+        var entries = adaptiveMusicPlayer.queue.entries
+        if let index = entries.firstIndex(where: { $0.id == current.id }) {
+            entries.removeSubrange(entries.index(after: index)..<entries.endIndex)
+            adaptiveMusicPlayer.queue.entries = entries
+        }
+        syncAdaptiveMusicPlayerState()
     }
 
     @discardableResult
@@ -985,6 +1017,7 @@ final class MusicPlaybackManager: ObservableObject {
     }
     
     func stop() {
+        invalidatePendingAdaptiveStart()
         musicPlayer.stop()
         stopAdaptivePlayback()
         isPlaying = false
@@ -1214,7 +1247,8 @@ final class MusicPlaybackManager: ObservableObject {
                 ResolvedAdaptiveMixItem(
                     suggestion: cleanedSuggestion,
                     song: song,
-                    catalogSong: nil
+                    catalogSong: nil,
+                    sourceSongKey: cleanedSuggestion.sessionSongKey
                 )
             )
         }

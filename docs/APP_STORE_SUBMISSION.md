@@ -1,6 +1,6 @@
 # Pancake App Store Submission Notes
 
-Last updated: September 20, 2026
+Last updated: September 23, 2026
 
 ## Product Positioning
 
@@ -49,8 +49,8 @@ Pancake pairs with its watch companion for guided outdoor runs.
 - The paid app provides structured run planning, watch-guided workouts, live workout progress, local run history, and profile controls without Apple Music authorization. The optional Apple Music integration has no separate charge, in-app purchase, advertising, or required user-information exchange.
 - Music does not start automatically. During an active workout, the reviewer can tap `Start Adaptive Mix` in the watch companion music control. That explicit action starts catalog playback.
 - The reviewer can also open Profile > Song Check on iPhone and tap `Generate And Play Mix` to verify the same user-initiated catalog playback without starting a workout.
-- While Adaptive Mix is active, Pancake refreshes three upcoming songs against the current run metrics about every 30 seconds. Each queued song is resolved to a playable Apple Music catalog listing before it enters the queue. If a generated candidate is unavailable, Pancake fills that slot with a different song. The active song is not interrupted. The queue advances only when the active song completes or the runner taps Next. Songs that actually play are excluded for the remainder of the workout; queued songs that never play are not permanently excluded.
-- About ten seconds before a planned interval transition, Pancake refreshes the upcoming queue against the next interval goal without automatically changing the active song.
+- While Adaptive Mix is active, Pancake refreshes three upcoming songs against the current run metrics about every 30 seconds. Each queued song is resolved to a playable Apple Music catalog listing before it enters the queue. If a generated candidate is unavailable, Pancake fills that slot with a different song. Within an interval, the active song continues until it completes or the runner taps Next. At a zone transition, the app can start a suitable song automatically while Adaptive Mix is active. Songs that actually play are excluded for the remainder of the workout; queued songs that never play are not permanently excluded.
+- Pancake prepares the next interval's music up to 45 seconds ahead, checks recording energy separately from taste, and targets an audible change 12 seconds before the boundary. Every queued alternative must fit the target zone, including saved-taste fallback candidates. If suitable songs are not ready, the current song continues while the app seeks a replacement. Paused playback remains paused; late results for older zones are discarded.
 - At each interval change, the watch offers music controls in the foreground prompt or system notification. Next Song changes playback only when selected; old interval actions are rejected.
 - Time-based interval pre-curation is deterministic. Distance-based interval pre-curation uses a live pace estimate and is best effort.
 - Tapping `Send run plan` on iPhone opens the Pancake watch app on the paired watch via `HKHealthStore.startWatchApp(with:)`, with the plan already in flight. The watch never starts the workout by itself — the runner still taps Start Run there. This is why the iPhone asks for permission to write workouts to Health; the phone itself does not save workouts.

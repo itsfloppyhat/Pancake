@@ -8,6 +8,8 @@ trap 'rm -rf "$PANCAKE_TEST_BUILD"' EXIT
 "$PANCAKE_ROOT/scripts/test_run_history_persistence.sh"
 
 xcrun swiftc -parse-as-library \
+  "$PANCAKE_ROOT/Shared/DistanceUnit.swift" \
+  "$PANCAKE_ROOT/Shared/AdaptiveMixTransitionPolicy.swift" \
   "$PANCAKE_ROOT/Pancake/Models/RunModels.swift" \
   "$PANCAKE_ROOT/Pancake/Models/MusicModels.swift" \
   "$PANCAKE_ROOT/Pancake/Models/UserProfileModels.swift" \
@@ -19,6 +21,7 @@ xcrun swiftc -parse-as-library \
 "$PANCAKE_TEST_BUILD/music-regressions"
 
 xcrun swiftc -parse-as-library \
+  "$PANCAKE_ROOT/Shared/DistanceUnit.swift" \
   "$PANCAKE_ROOT/Pancake Watch Watch App/RunModels.swift" \
   "$PANCAKE_ROOT/Pancake Watch Watch App/RunHistoryStore.swift" \
   "$PANCAKE_ROOT/Pancake Watch Watch App/WatchWorkoutState.swift" \
@@ -27,7 +30,27 @@ xcrun swiftc -parse-as-library \
 "$PANCAKE_TEST_BUILD/watch-regressions"
 
 xcrun swiftc -parse-as-library \
+  "$PANCAKE_ROOT/Shared/DistanceUnit.swift" \
   "$PANCAKE_ROOT/Pancake/Models/SocialModels.swift" \
   "$PANCAKE_ROOT/Tests/CheerRunAlertPolicyRegression.swift" \
   -o "$PANCAKE_TEST_BUILD/cheer-regressions"
 "$PANCAKE_TEST_BUILD/cheer-regressions"
+
+xcrun swiftc -parse-as-library \
+  "$PANCAKE_ROOT/Shared/DistanceUnit.swift" \
+  "$PANCAKE_ROOT/Pancake/Models/RunModels.swift" \
+  "$PANCAKE_ROOT/Pancake/History/RunReplayAnalysis.swift" \
+  "$PANCAKE_ROOT/Pancake/RunRouteInbox.swift" \
+  "$PANCAKE_ROOT/Tests/RunReplayRegression.swift" \
+  -o "$PANCAKE_TEST_BUILD/replay-regressions"
+"$PANCAKE_TEST_BUILD/replay-regressions"
+
+# Exercise identical units behavior against both independently compiled run models.
+for PANCAKE_MODEL in "Pancake/Models/RunModels.swift" "Pancake Watch Watch App/RunModels.swift"; do
+  xcrun swiftc -parse-as-library \
+    "$PANCAKE_ROOT/Shared/DistanceUnit.swift" \
+    "$PANCAKE_ROOT/$PANCAKE_MODEL" \
+    "$PANCAKE_ROOT/Tests/DistanceUnitRegression.swift" \
+    -o "$PANCAKE_TEST_BUILD/distance-regressions"
+  "$PANCAKE_TEST_BUILD/distance-regressions"
+done

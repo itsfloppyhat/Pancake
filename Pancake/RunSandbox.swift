@@ -137,7 +137,7 @@ final class AdaptiveMixEvalRecorder: ObservableObject {
 
 /// DEBUG-only "virtual watch": drives WorkoutMusicCoordinator through the
 /// same NotificationCenter messages the real watch companion sends, so the
-/// full production pipeline (segment changes, 10-second pre-interval
+/// full production pipeline (segment changes, early preparation and playback,
 /// curation, 30-second refreshes, queue refills) runs against live, tunable
 /// speed and heart-rate values with real Apple Music playback.
 @MainActor
@@ -161,9 +161,10 @@ final class RunSandboxDriver: ObservableObject {
     private var segmentStartDistance: Double = 0
     private var secondsSinceUpdateSent = 0
     private var lastPrecuratedSegmentIndex: Int?
+    private var lastMusicTransitionSegmentIndex: Int?
 
     private static let updateInterval = 5
-    private static let precurationLeadTime: TimeInterval = 10
+    private static let precurationLeadTime = AdaptiveMixTransitionPolicy.preparationLeadTime
 
     static let defaultPlan: [RunSegment] = [
         RunSegment(intensity: .zone2, target: .time(seconds: 180)),
@@ -182,7 +183,11 @@ final class RunSandboxDriver: ObservableObject {
         currentSegment?.intensity.defaultTargetHeartRate
     }
 
-    func start(plan: [RunSegment] = RunSandboxDriver.defaultPlan) {
+    func start() {
+        start(plan: Self.defaultPlan)
+    }
+
+    func start(plan: [RunSegment]) {
         guard !isRunning else { return }
 
         plannedSegments = plan
@@ -193,6 +198,7 @@ final class RunSandboxDriver: ObservableObject {
         segmentStartDistance = 0
         secondsSinceUpdateSent = 0
         lastPrecuratedSegmentIndex = nil
+        lastMusicTransitionSegmentIndex = nil
         isRunning = true
         Self.isSandboxRunActive = true
 
@@ -216,7 +222,13 @@ final class RunSandboxDriver: ObservableObject {
         NotificationCenter.default.post(name: .workoutControl, object: startMessage)
         sendWorkoutUpdate()
 
-        tickTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+        let tickInterval: TimeInterval
+        #if targetEnvironment(simulator)
+        tickInterval = AdaptiveMixSimulation.usesLocalTransitionDriver ? 0.1 : 1
+        #else
+        tickInterval = 1
+        #endif
+        tickTimer = Timer.scheduledTimer(withTimeInterval: tickInterval, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.tick()
             }
@@ -302,17 +314,18 @@ final class RunSandboxDriver: ObservableObject {
 
     private func checkForPrecuration() {
         let upcomingIndex = currentSegmentIndex + 1
-        guard upcomingIndex < plannedSegments.count,
-              lastPrecuratedSegmentIndex != upcomingIndex,
-              let remaining = segmentSecondsRemaining(),
-              remaining > 0,
-              remaining <= Self.precurationLeadTime else {
-            return
+        guard upcomingIndex < plannedSegments.count else { return }
+        let remaining = segmentSecondsRemaining()
+        if lastPrecuratedSegmentIndex != upcomingIndex,
+           AdaptiveMixTransitionPolicy.isWithin(Self.precurationLeadTime, secondsRemaining: remaining) {
+            lastPrecuratedSegmentIndex = upcomingIndex
+            sendWorkoutUpdate()
         }
-
-        lastPrecuratedSegmentIndex = upcomingIndex
-        print("PANCAKE_EVAL:PRECURATION upcomingIndex=\(upcomingIndex) zone=\(plannedSegments[upcomingIndex].intensity.label)")
-        sendWorkoutUpdate(adaptiveMixCurationTargetSegmentIndex: upcomingIndex)
+        if lastMusicTransitionSegmentIndex != upcomingIndex,
+           AdaptiveMixTransitionPolicy.isWithin(AdaptiveMixTransitionPolicy.playbackLeadTime, secondsRemaining: remaining) {
+            lastMusicTransitionSegmentIndex = upcomingIndex
+            sendWorkoutUpdate()
+        }
     }
 
     private func updateSecondsRemaining() {
@@ -328,6 +341,9 @@ final class RunSandboxDriver: ObservableObject {
             "heartRate": Int(heartRate)
         ]
 
+        if let remaining = segmentSecondsRemaining() {
+            message["estimatedSecondsRemaining"] = remaining
+        }
         if let targetHeartRate = currentTargetHeartRate {
             message["targetHeartRate"] = targetHeartRate
         }

@@ -2,6 +2,7 @@ import SwiftUI
 import WatchKit
 
 struct WorkoutProgressView: View {
+    @AppStorage(DistanceUnit.preferenceKey) private var distanceUnit: DistanceUnit = .kilometers
     @ObservedObject var manager: WorkoutSessionManager
     @ObservedObject private var watchConnectivity = WatchConnectivityManager.shared
     @ObservedObject private var intervalNotifications = IntervalNotificationManager.shared
@@ -24,7 +25,9 @@ struct WorkoutProgressView: View {
                 workoutPages
             }
         }
-        .sheet(item: $intervalNotifications.currentInterval) { interval in
+        .sheet(item: $intervalNotifications.currentInterval, onDismiss: {
+            selectedPage = 1
+        }) { interval in
             IntervalMusicControlsView(interval: interval)
         }
     }
@@ -67,15 +70,23 @@ struct WorkoutProgressView: View {
             showCheer(cheer)
         }
         .overlay {
-            if manager.showKmMilestone {
-                KmMilestoneOverlay(
-                    km: manager.lastKmMilestone,
+            if manager.showDistanceMilestone {
+                DistanceMilestoneOverlay(
+                    distance: manager.lastDistanceMilestone,
+                    unit: manager.milestoneUnit,
                     pace: currentPace
                 )
                 .transition(.opacity)
-                .animation(.easeInOut(duration: 0.3), value: manager.showKmMilestone)
+                .animation(.easeInOut(duration: 0.3), value: manager.showDistanceMilestone)
                 .allowsHitTesting(false)
             }
+        }
+        .onChange(of: intervalNotifications.currentInterval?.id) { _, id in
+            if id == nil { intervalNotifications.clearInterval() }
+            selectedPage = 1
+        }
+        .onChange(of: manager.showDistanceMilestone) { _, _ in
+            selectedPage = 1
         }
         .alert("End Workout", isPresented: $showingEndConfirmation) {
             Button("Cancel", role: .cancel) { }
@@ -90,9 +101,7 @@ struct WorkoutProgressView: View {
     private var currentPace: String? {
         guard manager.displayedDistanceKm > 0 else { return nil }
         let paceSeconds = manager.workoutDuration / manager.displayedDistanceKm
-        let minutes = Int(paceSeconds) / 60
-        let seconds = Int(paceSeconds) % 60
-        return String(format: "%d:%02d/km", minutes, seconds)
+        return distanceUnit.formattedPace(secondsPerKm: paceSeconds)
     }
 
     private func togglePause() {
@@ -186,6 +195,7 @@ private struct WorkoutControlButton: View {
 // MARK: - Metrics Page
 
 private struct WorkoutMetricsPage: View {
+    @AppStorage(DistanceUnit.preferenceKey) private var distanceUnit: DistanceUnit = .kilometers
     @ObservedObject var manager: WorkoutSessionManager
 
     var body: some View {
@@ -214,15 +224,15 @@ private struct WorkoutMetricsPage: View {
             HStack(spacing: 12) {
                 WorkoutMetric(
                     title: "Distance",
-                    value: String(format: "%.2f", manager.displayedDistanceKm),
-                    unit: "km",
+                    value: String(format: "%.2f", distanceUnit.distance(meters: manager.displayedDistanceKm * 1000)),
+                    unit: distanceUnit.symbol,
                     color: .green
                 )
 
                 WorkoutMetric(
                     title: "Pace",
                     value: formattedPace,
-                    unit: "/km",
+                    unit: "/\(distanceUnit.symbol)",
                     color: .purple
                 )
 
@@ -252,9 +262,7 @@ private struct WorkoutMetricsPage: View {
     private var formattedPace: String {
         guard manager.displayedDistanceKm > 0 else { return "--:--" }
         let paceSeconds = manager.workoutDuration / manager.displayedDistanceKm
-        let minutes = Int(paceSeconds) / 60
-        let seconds = Int(paceSeconds) % 60
-        return String(format: "%d:%02d", minutes, seconds)
+        return distanceUnit.formattedPace(secondsPerKm: paceSeconds, includeUnit: false)
     }
 }
 
@@ -384,6 +392,7 @@ private struct HeartRateZoneView: View {
 // MARK: - Plan Page
 
 private struct WorkoutPlanPage: View {
+    @AppStorage(DistanceUnit.preferenceKey) private var distanceUnit: DistanceUnit = .kilometers
     @ObservedObject var manager: WorkoutSessionManager
 
     var body: some View {
@@ -456,7 +465,7 @@ private struct WorkoutPlanPage: View {
             return "\(Int(seconds).formattedTime()) left"
         case .distance(let meters):
             let remainingMeters = Int(Double(meters) * (1.0 - manager.currentSegmentProgress))
-            return "\(remainingMeters.formattedDistanceMeters()) left"
+            return "\(remainingMeters.formattedDistanceMeters(unit: distanceUnit)) left"
         }
     }
 
@@ -465,7 +474,7 @@ private struct WorkoutPlanPage: View {
         case .time(let seconds):
             return seconds.formattedTime()
         case .distance(let meters):
-            return meters.formattedDistanceMeters()
+            return meters.formattedDistanceMeters(unit: distanceUnit)
         }
     }
 
@@ -494,6 +503,7 @@ private struct WorkoutMusicPage: View {
 // MARK: - Summary View
 
 private struct WorkoutSummaryView: View {
+    @AppStorage(DistanceUnit.preferenceKey) private var distanceUnit: DistanceUnit = .kilometers
     let summary: WorkoutSummary
     let onDone: () -> Void
 
@@ -520,7 +530,7 @@ private struct WorkoutSummaryView: View {
                 }
 
                 SummaryMetricRow(title: "Time", value: summary.totalSeconds.formattedTime())
-                SummaryMetricRow(title: "Distance", value: String(format: "%.2f km", summary.totalDistanceKm))
+                SummaryMetricRow(title: "Distance", value: distanceUnit.formattedDistance(meters: summary.totalDistanceKm * 1000))
 
                 if let pace = summary.formattedPace {
                     SummaryMetricRow(title: "Avg Pace", value: pace)
@@ -657,10 +667,11 @@ struct GPSStatusView: View {
     }
 }
 
-// MARK: - Km Milestone Overlay
+// MARK: - Distance Milestone Overlay
 
-struct KmMilestoneOverlay: View {
-    let km: Int
+struct DistanceMilestoneOverlay: View {
+    let distance: Int
+    let unit: DistanceUnit
     let pace: String?
 
     var body: some View {
@@ -673,7 +684,7 @@ struct KmMilestoneOverlay: View {
                     .font(.system(size: 28))
                     .foregroundStyle(.green)
 
-                Text("\(km) km")
+                Text("\(distance) \(unit.symbol)")
                     .font(.system(size: 36, weight: .bold, design: .rounded))
                     .foregroundStyle(.white)
 

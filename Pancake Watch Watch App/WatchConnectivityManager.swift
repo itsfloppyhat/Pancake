@@ -59,13 +59,14 @@ final class WatchConnectivityManager: NSObject, ObservableObject {
         }
     }
     
-    func sendWorkoutStarted(runID: UUID, startedAt: Date, segments: [RunSegment]) {
+    func sendWorkoutStarted(runID: UUID, startedAt: Date, segments: [RunSegment], startAdaptiveMix: Bool = false) {
         guard WCSession.isSupported() else { return }
         
         var message: [String: Any] = [
             "type": WatchMessageType.workoutStarted.rawValue,
             "runID": runID.uuidString,
-            "startedAt": startedAt.timeIntervalSince1970
+            "startedAt": startedAt.timeIntervalSince1970,
+            "startAdaptiveMix": startAdaptiveMix
         ]
         message["segments"] = try? JSONEncoder().encode(segments)
 
@@ -149,7 +150,6 @@ final class WatchConnectivityManager: NSObject, ObservableObject {
     func restoreLatestRunPlan() {
         guard WCSession.isSupported(), WCSession.default.activationState == .activated else { return }
         let context = WCSession.default.receivedApplicationContext
-        guard context["type"] as? String == WatchMessageType.runPlan.rawValue else { return }
         handleIncomingMessage(context)
     }
 
@@ -230,6 +230,7 @@ extension WatchConnectivityManager: WCSessionDelegate {
             self.isReachable = session.isReachable
             if activationState == .activated {
                 self.restoreLatestRunPlan()
+                WatchRunRouteTransfer.retryPending()
             }
         }
     }
@@ -237,7 +238,12 @@ extension WatchConnectivityManager: WCSessionDelegate {
     func sessionReachabilityDidChange(_ session: WCSession) {
         DispatchQueue.main.async {
             self.isReachable = session.isReachable
+            WatchRunRouteTransfer.retryPending()
         }
+    }
+
+    func session(_ session: WCSession, didFinish fileTransfer: WCSessionFileTransfer, error: Error?) {
+        WatchRunRouteTransfer.finished(fileTransfer, error: error)
     }
 
     func session(_ session: WCSession, didReceiveUserInfo userInfo: [String : Any] = [:]) {
@@ -266,11 +272,19 @@ extension WatchConnectivityManager: WCSessionDelegate {
     }
 
     private func handleIncomingMessage(_ message: [String: Any]) {
+        if let rawUnit = message[DistanceUnit.preferenceKey] as? String,
+           let unit = DistanceUnit(rawValue: rawUnit) {
+            UserDefaults.standard.set(unit.rawValue, forKey: DistanceUnit.preferenceKey)
+        }
         guard let type = message["type"] as? String else {
             return
         }
 
         switch type {
+        case "runRouteReceived":
+            if let rawID = message["runID"] as? String, let runID = UUID(uuidString: rawID) {
+                WatchRunRouteTransfer.acknowledge(runID: runID)
+            }
         case WatchMessageType.runPlan.rawValue:
             guard let segmentsData = message["segments"] as? Data else { break }
             guard shouldAcceptRunPlan(message) else { break }

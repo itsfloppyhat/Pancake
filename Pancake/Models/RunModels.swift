@@ -216,6 +216,7 @@ struct WorkoutDataPoint: Codable, Equatable, Hashable {
     let paceSecondsPerKm: Double?    // nil if distance is 0
     let currentSongTitle: String?
     let currentSongArtist: String?
+    var targetHeartRate: Int? = nil
 }
 
 // MARK: - SongPeriod
@@ -235,12 +236,13 @@ struct RunEvent: Identifiable, Codable, Equatable, Hashable {
     let segments: [RunSegment]
     let dataPoints: [WorkoutDataPoint]
     let songHistory: [SongPeriod]
+    let routePoints: [RunRoutePoint]
 
     enum CodingKeys: String, CodingKey {
-        case id, date, totalDistanceMeters, totalTimeSeconds, segments, dataPoints, songHistory
+        case id, date, totalDistanceMeters, totalTimeSeconds, segments, dataPoints, songHistory, routePoints
     }
 
-    init(id: UUID = UUID(), date: Date = Date(), totalDistanceMeters: Int, totalTimeSeconds: Int, segments: [RunSegment], dataPoints: [WorkoutDataPoint] = [], songHistory: [SongPeriod] = []) {
+    init(id: UUID = UUID(), date: Date = Date(), totalDistanceMeters: Int, totalTimeSeconds: Int, segments: [RunSegment], dataPoints: [WorkoutDataPoint] = [], songHistory: [SongPeriod] = [], routePoints: [RunRoutePoint] = []) {
         self.id = id
         self.date = date
         self.totalDistanceMeters = totalDistanceMeters
@@ -248,6 +250,7 @@ struct RunEvent: Identifiable, Codable, Equatable, Hashable {
         self.segments = segments
         self.dataPoints = dataPoints
         self.songHistory = songHistory
+        self.routePoints = routePoints
     }
 
     init(from decoder: Decoder) throws {
@@ -259,6 +262,7 @@ struct RunEvent: Identifiable, Codable, Equatable, Hashable {
         segments = try container.decode([RunSegment].self, forKey: .segments)
         dataPoints = try container.decodeIfPresent([WorkoutDataPoint].self, forKey: .dataPoints) ?? []
         songHistory = try container.decodeIfPresent([SongPeriod].self, forKey: .songHistory) ?? []
+        routePoints = try container.decodeIfPresent([RunRoutePoint].self, forKey: .routePoints) ?? []
     }
 
     var effortSummary: String {
@@ -276,9 +280,7 @@ struct RunEvent: Identifiable, Codable, Equatable, Hashable {
 
     var formattedPace: String? {
         guard let pace = averagePacePerKm else { return nil }
-        let minutes = Int(pace) / 60
-        let seconds = Int(pace) % 60
-        return String(format: "%d:%02d/km", minutes, seconds)
+        return DistanceUnit.preferred.formattedPace(secondsPerKm: pace)
     }
 
     var averageHeartRate: Int? {
@@ -388,17 +390,8 @@ extension Int {
         }
     }
 
-    func formattedDistanceMeters() -> String {
-        if self >= 1000 {
-            let km = Double(self) / 1000.0
-            if km == floor(km) {
-                return String(format: "%.0f km", km)
-            } else {
-                return String(format: "%.1f km", km)
-            }
-        } else {
-            return "\(self) m"
-        }
+    func formattedDistanceMeters(unit: DistanceUnit = .preferred) -> String {
+        unit.formattedTarget(meters: self)
     }
 }
 
@@ -408,4 +401,36 @@ extension TimeInterval {
         let seconds = Int(self) % 60
         return String(format: "%d:%02d", minutes, seconds)
     }
+}
+
+// MARK: - Recorded GPS route
+/// Active workout time (pauses excluded) keeps location, metrics and music aligned.
+struct RunRoutePoint: Codable, Equatable, Hashable {
+    let timestamp: TimeInterval
+    let latitude: Double
+    let longitude: Double
+    let horizontalAccuracy: Double
+    let distanceMeters: Double
+    let heartRate: Int?
+    let targetHeartRate: Int?
+    let speedMetersPerSecond: Double?
+    let startsNewSection: Bool
+
+    var isValid: Bool {
+        timestamp.isFinite && timestamp >= 0 &&
+        latitude.isFinite && (-90...90).contains(latitude) &&
+        longitude.isFinite && (-180...180).contains(longitude) &&
+        horizontalAccuracy.isFinite && (0...50).contains(horizontalAccuracy) &&
+        distanceMeters.isFinite && distanceMeters >= 0
+    }
+}
+
+/// Transferred as a file so a long run never exceeds WatchConnectivity's message limit.
+struct RunRouteArchive: Codable {
+    let runID: UUID
+    let startedAt: Date
+    let totalDistanceMeters: Int
+    let totalTimeSeconds: Int
+    let segments: [RunSegment]
+    let points: [RunRoutePoint]
 }

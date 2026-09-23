@@ -54,7 +54,7 @@ The watch companion owns workout tracking. The iPhone owns run planning, local h
 3. Optionally connect Apple Music playback or import library taste.
 4. Plan a structured run on iPhone.
 5. Send the plan to the paired watch and start the workout there.
-6. Optionally tap `Start Adaptive Mix` on the watch companion. The active song changes only when playback completes or the runner taps Next.
+6. Optionally tap `Start Adaptive Mix` on the watch companion. During Adaptive Mix, music also transitions to the upcoming zone about 12 seconds before its interval begins, when suitable songs are ready.
 7. Complete the workout and review local history on iPhone.
 
 ## Running The App

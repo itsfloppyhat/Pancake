@@ -4,6 +4,7 @@ import UIKit
 
 struct CheerSquadView: View {
     @StateObject private var manager = CheerSquadManager.shared
+    @StateObject private var profileManager = UserProfileManager.shared
     @Environment(\.dismiss) private var dismiss
     @State private var memberToBlock: SquadMember?
     @State private var shareToManage: CheerSquadSharePresentation?
@@ -13,6 +14,7 @@ struct CheerSquadView: View {
             ScrollView {
                 VStack(spacing: 20) {
                     headerCard
+                    CheerSquadNameCard()
 
                     if let explanation = manager.availability.explanation {
                         CheerSquadNoticeCard(message: explanation)
@@ -176,7 +178,7 @@ struct CheerSquadView: View {
                     }
                 }
                 .buttonStyle(BubblyGradientButtonStyle(gradient: .pastelStart))
-                .disabled(manager.availability != .available || manager.isBusy)
+                .disabled(manager.availability != .available || manager.isBusy || !hasDisplayName)
             }
         }
         .bubblyCard()
@@ -275,11 +277,110 @@ struct CheerSquadView: View {
         )
     }
 
+    private var hasDisplayName: Bool {
+        !profileManager.userProfile.personalInfo.displayName
+            .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     private var announceToggleBinding: Binding<Bool> {
         Binding(
             get: { manager.settings.announceCheersDuringRuns },
             set: { manager.settings.announceCheersDuringRuns = $0 }
         )
+    }
+}
+
+// MARK: - Shared profile name
+
+private struct CheerSquadNameCard: View {
+    @StateObject private var profileManager = UserProfileManager.shared
+    @State private var showingNameEditor = false
+
+    private var displayName: String {
+        profileManager.userProfile.personalInfo.displayName
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Your name in Cheer Squad")
+                .font(.headline)
+
+            if displayName.isEmpty {
+                Text("Add a name or username before inviting friends or sending cheers.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text(displayName)
+                    .font(.subheadline)
+            }
+
+            Text("Friends see this name on your squad, invitations, and new cheers. It is also your profile display name.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Button(displayName.isEmpty ? "Add name or username" : "Edit name") {
+                showingNameEditor = true
+            }
+            .buttonStyle(BubblySmallButtonStyle(backgroundColor: .pastelPeriwinkle))
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .bubblyCard()
+        .sheet(isPresented: $showingNameEditor) {
+            CheerSquadNameEditor(displayName: displayName)
+        }
+    }
+}
+
+private struct CheerSquadNameEditor: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var displayName: String
+    @FocusState private var nameIsFocused: Bool
+
+    init(displayName: String) {
+        _displayName = State(initialValue: displayName)
+    }
+
+    private var trimmedName: String {
+        displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("Name or username", text: $displayName)
+                        .textInputAutocapitalization(.words)
+                        .autocorrectionDisabled()
+                        .focused($nameIsFocused)
+                        .submitLabel(.done)
+                        .onSubmit(save)
+                } footer: {
+                    Text("Choose a name your friends will recognize. This updates your profile display name too.")
+                }
+            }
+            .navigationTitle("Your display name")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save", action: save)
+                        .disabled(trimmedName.isEmpty)
+                }
+            }
+            .onAppear { nameIsFocused = true }
+        }
+    }
+
+    private func save() {
+        guard !trimmedName.isEmpty else { return }
+        let profileManager = UserProfileManager.shared
+        var info = profileManager.userProfile.personalInfo
+        info.displayName = trimmedName
+        profileManager.updatePersonalInfo(info)
+        dismiss()
     }
 }
 
@@ -339,6 +440,7 @@ struct SendCheerView: View {
     let squad: JoinedSquad
 
     @StateObject private var manager = CheerSquadManager.shared
+    @StateObject private var profileManager = UserProfileManager.shared
     @State private var customMessage = ""
     @State private var sendConfirmation: String?
     @State private var isSending = false
@@ -358,6 +460,8 @@ struct SendCheerView: View {
                         .foregroundStyle(.secondary)
                 }
 
+                CheerSquadNameCard()
+
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Quick cheers")
                         .font(.headline)
@@ -370,7 +474,7 @@ struct SendCheerView: View {
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         }
                         .buttonStyle(BubblySmallButtonStyle(backgroundColor: .pastelMint))
-                        .disabled(isSending)
+                        .disabled(isSending || !hasDisplayName)
                     }
                 }
                 .bubblyCard()
@@ -395,7 +499,7 @@ struct SendCheerView: View {
                         }
                     }
                     .buttonStyle(BubblyGradientButtonStyle(gradient: .pastelStart))
-                    .disabled(customMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSending)
+                    .disabled(customMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSending || !hasDisplayName)
                 }
                 .bubblyCard()
 
@@ -414,6 +518,11 @@ struct SendCheerView: View {
         .background(Color.pastelGroupedBackground.ignoresSafeArea())
         .navigationTitle("Send a cheer")
         .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private var hasDisplayName: Bool {
+        !profileManager.userProfile.personalInfo.displayName
+            .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private func send(_ message: String) {

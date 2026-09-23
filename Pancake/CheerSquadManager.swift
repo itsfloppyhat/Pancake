@@ -78,6 +78,7 @@ final class CheerSquadManager: ObservableObject {
     private var runStartedAt: Date? { currentRun?.isRunning == true ? currentRun?.startedAt : nil }
     private var seenCheerRecordNames: Set<String> = []
     private var refreshTask: Task<Void, Never>?
+    private var profileNameObservation: AnyCancellable?
     private var runStatusTask: Task<Void, Never>?
     private var lastWrittenRun: CheerRunBroadcast?
     private var notifiedRunIDs: [String: String]
@@ -99,6 +100,7 @@ final class CheerSquadManager: ObservableObject {
         #if DEBUG
         let process = ProcessInfo.processInfo
         return process.arguments.contains("--pancake-simulated-run") ||
+            process.arguments.contains("--pancake-history-preview") ||
             process.environment["PANCAKE_SIMULATED_RUN"] == "1"
         #else
         return false
@@ -117,6 +119,18 @@ final class CheerSquadManager: ObservableObject {
         if UserDefaults.standard.bool(forKey: privateInvitationsKey) {
             sharingMigrationNotice = Self.privateInvitationsMessage
         }
+        profileNameObservation = UserProfileManager.shared.$userProfile
+            .map { $0.personalInfo.displayName.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .removeDuplicates()
+            .dropFirst()
+            .sink { [weak self] _ in
+                // Published values arrive before the profile is updated. Read
+                // the committed name on the next main-actor turn.
+                Task { @MainActor [weak self] in
+                    guard let self, self.isSharingEnabled else { return }
+                    await self.refresh()
+                }
+            }
     }
 
     private static let privateInvitationsMessage = "Your old anyone-with-link invitation has been retired. Invite your supporters again using Invite and manage supporters; only the iCloud accounts you choose can join."
@@ -131,10 +145,9 @@ final class CheerSquadManager: ObservableObject {
         return fresh
     }
 
-    private var runnerDisplayName: String {
-        let name = UserProfileManager.shared.userProfile.personalInfo.displayName
+    private var profileDisplayName: String {
+        UserProfileManager.shared.userProfile.personalInfo.displayName
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        return name.isEmpty ? "Your friend" : name
     }
 
     // MARK: - Refresh
@@ -144,7 +157,15 @@ final class CheerSquadManager: ObservableObject {
             await refreshTask.value
             return
         }
-        let task = Task { await performRefresh() }
+        let task = Task {
+            var refreshedName: String
+            repeat {
+                refreshedName = profileDisplayName
+                await performRefresh()
+                // A profile edit (or its initial disk load) may finish while
+                // CloudKit is saving. Publish the newest name before stopping.
+            } while refreshedName != profileDisplayName
+        }
         refreshTask = task
         await task.value
         refreshTask = nil
@@ -214,11 +235,14 @@ final class CheerSquadManager: ObservableObject {
             if let share = record as? CKShare {
                 // Saving .none removes legacy public participants. Do not
                 // advertise an insecure share if this migration fails.
-                applyOwnShare(try await ensurePrivateShare(share))
-                let infoID = CKRecord.ID(recordName: CheerSquadSchema.squadInfoRecordName, zoneID: ownZoneID)
-                if let info = try? await privateDatabase.record(for: infoID),
-                   let legacyID = info[CheerSquadSchema.squadIDField] as? String {
-                    legacySquadIDs.insert(legacyID)
+                let privateShare = try await ensurePrivateShare(share)
+                applyOwnShare(privateShare)
+                do {
+                    try await updateSharedDisplayName(in: privateShare)
+                } catch {
+                    // Keep an existing squad usable when a rename is offline;
+                    // refresh retries from the saved profile next time.
+                    recordError(error)
                 }
             }
         } catch let error as CKError where error.code == .unknownItem || error.code == .zoneNotFound {
@@ -227,6 +251,38 @@ final class CheerSquadManager: ObservableObject {
             clearOwnShare()
             recordError(error)
         }
+    }
+
+    private func updateSharedDisplayName(in share: CKShare) async throws {
+        let infoID = CKRecord.ID(recordName: CheerSquadSchema.squadInfoRecordName, zoneID: ownZoneID)
+        let info = try await privateDatabase.record(for: infoID)
+        if let legacyID = info[CheerSquadSchema.squadIDField] as? String {
+            legacySquadIDs.insert(legacyID)
+        }
+
+        let name = profileDisplayName
+        // A device with an unset profile must not replace an existing squad's
+        // name with a placeholder. New shares and cheers require a name below.
+        guard !name.isEmpty else { return }
+        let title = "\(name)'s Cheer Squad"
+        var changedRecords: [CKRecord] = []
+        if info[CheerSquadSchema.runnerNameField] as? String != name {
+            info[CheerSquadSchema.runnerNameField] = name
+            changedRecords.append(info)
+        }
+        if share[CKShare.SystemFieldKey.title] as? String != title {
+            share[CKShare.SystemFieldKey.title] = title as CKRecordValue
+            changedRecords.append(share)
+        }
+        guard !changedRecords.isEmpty else { return }
+
+        let results = try await privateDatabase.modifyRecords(saving: changedRecords, deleting: [])
+        for result in results.saveResults.values {
+            if let savedShare = try result.get() as? CKShare {
+                applyOwnShare(savedShare)
+            }
+        }
+        lastErrorMessage = nil
     }
 
     private func applyOwnShare(_ share: CKShare) {
@@ -351,6 +407,11 @@ final class CheerSquadManager: ObservableObject {
     func enableSharing() async {
         await refreshAccountStatus()
         guard availability == .available else { return }
+        let name = profileDisplayName
+        guard !name.isEmpty else {
+            lastErrorMessage = "Add a name or username before inviting your squad."
+            return
+        }
         isBusy = true
         defer { isBusy = false }
 
@@ -370,10 +431,10 @@ final class CheerSquadManager: ObservableObject {
             let existingID = info[CheerSquadSchema.squadIDField] as? String
             if let existingID { legacySquadIDs.insert(existingID) }
             info[CheerSquadSchema.squadIDField] = existingID ?? squadID
-            info[CheerSquadSchema.runnerNameField] = runnerDisplayName
+            info[CheerSquadSchema.runnerNameField] = name
 
             let share = try await ensurePrivateShare(existingOrNewZoneShare())
-            share[CKShare.SystemFieldKey.title] = "\(runnerDisplayName)'s Cheer Squad" as CKRecordValue
+            share[CKShare.SystemFieldKey.title] = "\(name)'s Cheer Squad" as CKRecordValue
             share.publicPermission = .none
 
             let results = try await privateDatabase.modifyRecords(saving: [info, share], deleting: [])
@@ -781,6 +842,11 @@ final class CheerSquadManager: ObservableObject {
 
     func sendCheer(to squad: JoinedSquad, message rawMessage: String) async -> Bool {
         guard availability == .available else { return false }
+        let senderName = profileDisplayName
+        guard !senderName.isEmpty else {
+            lastErrorMessage = "Add a name or username so your friend knows who is cheering."
+            return false
+        }
         guard let message = CheerContentPolicy.sanitized(rawMessage) else {
             lastErrorMessage = "That cheer can't be sent. Keep it short and friendly."
             return false
@@ -790,7 +856,7 @@ final class CheerSquadManager: ObservableObject {
             let recordID = CKRecord.ID(recordName: UUID().uuidString, zoneID: squad.zoneID)
             let record = CKRecord(recordType: CheerSquadSchema.cheerRecordType, recordID: recordID)
             record[CheerSquadSchema.messageField] = message
-            record[CheerSquadSchema.senderNameField] = runnerDisplayName
+            record[CheerSquadSchema.senderNameField] = senderName
             record[CheerSquadSchema.sentAtField] = Date()
 
             _ = try await sharedDatabase.save(record)

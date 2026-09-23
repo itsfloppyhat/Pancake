@@ -208,7 +208,7 @@ enum MusicRecommendationPolicy {
             MusicSuggestion(
                 songTitle: song.title,
                 artist: song.artist,
-                reason: "Using one of the runner's saved favorite songs as a fast fallback while keeping the \(intensity.label) effort on track.",
+                reason: "Candidate from the runner's saved favorites; taste alone does not establish workout fit.",
                 mood: mood,
                 confidence: 0.66
             )
@@ -218,7 +218,7 @@ enum MusicRecommendationPolicy {
             MusicSuggestion(
                 songTitle: song.title,
                 artist: song.artist,
-                reason: "Using a song from \(playlistName) as a fast fallback that still matches the runner's taste profile.",
+                reason: "Candidate from \(playlistName) matching the runner's taste profile.",
                 mood: mood,
                 confidence: 0.62
             )
@@ -377,11 +377,10 @@ enum AdaptiveMixGuidance: String, Codable, Equatable {
 
 enum AdaptiveMixPolicy {
     static let refreshInterval: TimeInterval = 30
-    /// Must stay in sync with WatchAdaptiveMixPolicy.upcomingIntervalLeadTime in the watch target.
-    static let upcomingIntervalLeadTime: TimeInterval = 10
+    static let upcomingIntervalLeadTime = AdaptiveMixTransitionPolicy.preparationLeadTime
     static let queueDepth = 3
     /// Starting playback tolerates a partial queue; refills top it back up to `queueDepth`.
-    static let minimumStartSongCount = 2
+    static let minimumStartSongCount = 1
 
     static func goalScore(
         targetIntensity: Intensity,
@@ -433,8 +432,7 @@ enum AdaptiveMixPolicy {
             return false
         }
 
-        return estimatedSecondsRemaining > 0 &&
-            estimatedSecondsRemaining <= upcomingIntervalLeadTime
+        return AdaptiveMixTransitionPolicy.isWithin(upcomingIntervalLeadTime, secondsRemaining: estimatedSecondsRemaining)
     }
 
     static func canQueue(
@@ -451,6 +449,39 @@ enum AdaptiveMixPolicy {
         in playedSongKeys: Set<String>
     ) -> Set<String> {
         playedSongKeys.union([songKey])
+    }
+}
+
+enum MusicEnergyLevel: String, Codable {
+    case calm, gentle, steady, driving, explosive
+}
+
+/// Describes the recording itself, independently of a requested zone or taste.
+/// This is a model assessment, not measured audio analysis. Unknown recordings
+/// and incomplete assessments are ineligible rather than assumed energetic.
+struct MusicEnergyAssessment {
+    let level: MusicEnergyLevel
+    let hasImmediateBeat: Bool
+    let isBallad: Bool
+    let confidence: Double
+
+    func fits(_ goal: AdaptiveMixGoalScore) -> Bool {
+        guard confidence.isFinite, confidence >= 0.8, confidence <= 1 else { return false }
+        let easing = goal.guidance == .easeDown
+        switch goal.targetIntensity {
+        case .zone1:
+            return level == .calm || level == .gentle
+        case .zone2:
+            return easing ? (level == .calm || level == .gentle) : (level == .gentle || level == .steady)
+        case .zone3:
+            if easing { return level == .calm || level == .gentle || level == .steady }
+            return !isBallad && hasImmediateBeat && (level == .steady || level == .driving)
+        case .zone4:
+            return !isBallad && hasImmediateBeat &&
+                (easing ? (level == .steady || level == .driving) : (level == .driving || level == .explosive))
+        case .zone5:
+            return !isBallad && hasImmediateBeat && (easing ? level == .driving : level == .explosive)
+        }
     }
 }
 

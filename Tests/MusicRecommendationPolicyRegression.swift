@@ -21,6 +21,9 @@ struct MusicRecommendationPolicyRegression {
             try testNormalizedSongIdentityCollapsesVariants()
             try testAdaptiveMixGoalScoring()
             try testUpcomingIntervalPrecurationWindow()
+            try testOneMinuteZoneTransition()
+            try testLateMusicResultsCannotRegressTarget()
+            try testSongEnergyEligibility()
             try testAdaptiveMixQueuedSongsRemainEligibleUntilPlayed()
             print("All Pancake music policy regressions passed.")
         } catch {
@@ -380,25 +383,25 @@ struct MusicRecommendationPolicyRegression {
 
     private static func testUpcomingIntervalPrecurationWindow() throws {
         try assertEqual(AdaptiveMixPolicy.refreshInterval, 30, "Adaptive Mix should regenerate playlists every 30 seconds.")
-        try assertEqual(AdaptiveMixPolicy.upcomingIntervalLeadTime, 10, "Adaptive Mix should pre-curate 10 seconds before a new segment.")
+        try assertEqual(AdaptiveMixPolicy.upcomingIntervalLeadTime, 45, "Preparation must allow time for generation, energy review, and catalog lookup.")
         try assertEqual(AdaptiveMixPolicy.queueDepth, 3, "Adaptive Mix should keep three verified upcoming songs.")
-        try assertEqual(AdaptiveMixPolicy.minimumStartSongCount, 2, "Adaptive Mix should be able to start with a partial queue of two verified songs.")
+        try assertEqual(AdaptiveMixPolicy.minimumStartSongCount, 1, "A suitable transition song must not wait for three more tracks.")
 
         try assertTrue(
             AdaptiveMixPolicy.shouldPrecurateUpcomingInterval(
-                estimatedSecondsRemaining: 10,
+                estimatedSecondsRemaining: 45,
                 hasUpcomingInterval: true,
                 alreadyPrecurated: false
             ),
-            "Ten seconds remaining should trigger next-interval curation."
+            "Forty-five seconds remaining should trigger preparation."
         )
         try assertTrue(
             !AdaptiveMixPolicy.shouldPrecurateUpcomingInterval(
-                estimatedSecondsRemaining: 11,
+                estimatedSecondsRemaining: 46,
                 hasUpcomingInterval: true,
                 alreadyPrecurated: false
             ),
-            "More than ten seconds remaining should not trigger next-interval curation."
+            "Preparation should wait until its lookahead window."
         )
         try assertTrue(
             !AdaptiveMixPolicy.shouldPrecurateUpcomingInterval(
@@ -408,6 +411,70 @@ struct MusicRecommendationPolicyRegression {
             ),
             "The same interval should only pre-curate once."
         )
+    }
+
+    private static func testOneMinuteZoneTransition() throws {
+        var state = AdaptiveMixTransitionState()
+        var preparationTimes: [Int] = []
+        var transitionTimes: [Int] = []
+        for time in 0...60 {
+            let remaining = Double(60 - time)
+            if AdaptiveMixTransitionPolicy.isWithin(AdaptiveMixTransitionPolicy.preparationLeadTime, secondsRemaining: remaining),
+               state.prepare(for: 1) { preparationTimes.append(time) }
+            if AdaptiveMixTransitionPolicy.isWithin(AdaptiveMixTransitionPolicy.playbackLeadTime, secondsRemaining: remaining),
+               state.advance(to: 1) { transitionTimes.append(time) }
+            if time < 48 { try assertEqual(state.targetSegmentIndex, 0, "Preparation must leave Zone 1 playing.") }
+            if time >= 48 { try assertEqual(state.targetSegmentIndex, 1, "Refreshes and skips must use the upcoming Zone 5 from second 48.") }
+        }
+        try assertEqual(preparationTimes, [15], "A one-minute interval prepares at second 15 exactly once.")
+        try assertEqual(transitionTimes, [48], "The audible transition should occur twelve seconds early, once.")
+        try assertTrue(!state.advance(to: 1), "The actual boundary must not cause a second skip.")
+        for value: Double? in [nil, 0, -1, .nan, .infinity] {
+            try assertTrue(!AdaptiveMixTransitionPolicy.isWithin(12, secondsRemaining: value), "Missing/invalid distance estimates must not trigger an early switch.")
+        }
+        var missedWarning = AdaptiveMixTransitionState()
+        try assertTrue(missedWarning.advance(to: 1), "The actual boundary must recover a missed advance warning.")
+    }
+
+    private static func testLateMusicResultsCannotRegressTarget() throws {
+        var state = AdaptiveMixTransitionState()
+        let session = state.sessionID
+        _ = state.prepare(for: 1)
+        try assertEqual(state.targetSegmentIndex, 0, "Preparing the next zone must not change the playback target.")
+        try assertTrue(state.acceptsResult(sessionID: session, segmentIndex: 1), "A next-zone result can be staged early.")
+        state.advance(to: 1)
+        try assertTrue(!state.acceptsResult(sessionID: session, segmentIndex: 0), "A slow Zone 1 response must be discarded after the Zone 5 transition.")
+        try assertTrue(!state.advance(to: 0), "A delayed workout update cannot regress the target.")
+        try assertEqual(state.curationSegmentIndex, 1, "Next and periodic refreshes must retain the upcoming zone before the workout boundary.")
+        _ = state.prepare(for: 2)
+        state.advance(to: 2)
+        try assertTrue(!state.acceptsResult(sessionID: session, segmentIndex: 1), "A later interval supersedes an unfinished earlier preparation.")
+        let restarted = AdaptiveMixTransitionState()
+        try assertTrue(!restarted.acceptsResult(sessionID: session, segmentIndex: 0), "Ending and restarting a run must invalidate every old response.")
+    }
+
+    private static func testSongEnergyEligibility() throws {
+        let peak = AdaptiveMixPolicy.goalScore(targetIntensity: .zone5, targetHeartRate: 181, effectiveHeartRate: 70)
+        let peakWithoutHR = AdaptiveMixPolicy.goalScore(targetIntensity: .zone5, targetHeartRate: 181, effectiveHeartRate: nil)
+        let recovery = AdaptiveMixPolicy.goalScore(targetIntensity: .zone1, targetHeartRate: 105, effectiveHeartRate: 105)
+        // Fixed assessment fixtures test enforcement, not the model's ability
+        // to recognize a real song. Device evaluation covers that separately.
+        let ballad = MusicEnergyAssessment(level: .calm, hasImmediateBeat: false, isBallad: true, confidence: 0.95)
+        let mislabeledBallad = MusicEnergyAssessment(level: .explosive, hasImmediateBeat: true, isBallad: true, confidence: 0.95)
+        let upbeatPop = MusicEnergyAssessment(level: .steady, hasImmediateBeat: true, isBallad: false, confidence: 0.95)
+        let sprint = MusicEnergyAssessment(level: .explosive, hasImmediateBeat: true, isBallad: false, confidence: 0.95)
+        let slowIntro = MusicEnergyAssessment(level: .explosive, hasImmediateBeat: false, isBallad: false, confidence: 0.95)
+        let unknown = MusicEnergyAssessment(level: .explosive, hasImmediateBeat: true, isBallad: false, confidence: 0.2)
+        try assertEqual(peak.guidance, .lift, "Sitting down must still request a lift into the planned Zone 5.")
+        try assertTrue(ballad.fits(recovery), "A known calm recording can fit recovery.")
+        for candidate in [ballad, mislabeledBallad, upbeatPop, slowIntro, unknown] {
+            try assertTrue(!candidate.fits(peak), "Zone 5 must reject ballads, merely upbeat pop, slow intros, and unknown recordings regardless of suggestion mood.")
+        }
+        try assertTrue(sprint.fits(peak) && sprint.fits(peakWithoutHR), "Peak-effort music should remain eligible with low or missing heart rate.")
+        try assertTrue(!sprint.fits(recovery), "The same fallback songs must not pass every zone.")
+        let overTarget = AdaptiveMixPolicy.goalScore(targetIntensity: .zone5, targetHeartRate: 181, effectiveHeartRate: 192)
+        let controlled = MusicEnergyAssessment(level: .driving, hasImmediateBeat: true, isBallad: false, confidence: 0.95)
+        try assertTrue(!sprint.fits(overTarget) && controlled.fits(overTarget), "When effort is above target, reduce arousal while retaining a clear beat.")
     }
 
     private static func testAdaptiveMixQueuedSongsRemainEligibleUntilPlayed() throws {

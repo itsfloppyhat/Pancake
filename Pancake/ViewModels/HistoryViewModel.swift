@@ -67,11 +67,7 @@ final class HistoryViewModel: ObservableObject {
     
     // MARK: - Statistics
     func getFormattedTotalDistance() -> String {
-        if totalDistanceKm >= 1.0 {
-            return String(format: "%.1f km", totalDistanceKm)
-        } else {
-            return String(format: "%.0f m", totalDistanceKm * 1000)
-        }
+        DistanceUnit.preferred.formattedTarget(meters: Int((totalDistanceKm * 1000).rounded()))
     }
     
     func getFormattedTotalDuration() -> String {
@@ -87,9 +83,7 @@ final class HistoryViewModel: ObservableObject {
     
     func getFormattedAveragePace() -> String? {
         guard let pace = averagePacePerKm else { return nil }
-        let minutes = Int(pace) / 60
-        let seconds = Int(pace) % 60
-        return String(format: "%d:%02d/km", minutes, seconds)
+        return DistanceUnit.preferred.formattedPace(secondsPerKm: pace)
     }
     
     // MARK: - Health Integration
@@ -118,7 +112,7 @@ final class HistoryViewModel: ObservableObject {
             if importedCount > 0 {
                 importResult = "Successfully imported \(importedCount) outdoor runs from Health"
             } else {
-                importResult = "No new outdoor runs found in Health (minimum 0.5km)"
+                importResult = "No new outdoor runs found in Health (minimum \(DistanceUnit.preferred.formattedDistance(meters: 500)))"
             }
         } catch {
             self.error = error

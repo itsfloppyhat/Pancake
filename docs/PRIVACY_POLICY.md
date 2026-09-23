@@ -42,6 +42,10 @@ Cheer Squad is an optional feature that lets a runner invite friends or family t
 
 ## Apple Services
 
+For new outdoor runs, Pancake records GPS coordinates, active elapsed time, speed, heart rate, and target heart rate on the watch. The completed route transfers to the paired iPhone and is stored with local run history for interactive replay. Song timing is associated locally. Routes and detailed measurements are not included in Cheer Squad records. Older runs without saved coordinates cannot display a reconstructed GPS route.
+
+The optional map background uses Apple's MapKit service to display the run's geographic area. Hiding the map leaves the colored route visible. Clearing local run history removes the route stored with that history.
+
 When Pancake searches the Apple Music catalog or requests playback through Apple frameworks, those requests are handled by Apple services under the user's Apple account and Apple Music subscription.
 
 When Pancake reads or writes workout information through Health, that data is managed through Apple's Health framework and the permissions granted by the user.

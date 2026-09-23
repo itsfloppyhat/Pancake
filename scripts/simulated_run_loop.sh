@@ -183,6 +183,7 @@ xcrun simctl location "$WATCH_UDID" start \
 echo "Launching watch and iPhone apps..."
 SIMCTL_CHILD_PANCAKE_SIMULATED_RUN=1 \
 SIMCTL_CHILD_PANCAKE_SIMULATED_MUSIC=1 \
+SIMCTL_CHILD_PANCAKE_SIM_TRANSITION_TEST="${PANCAKE_SIM_TRANSITION_TEST:-0}" \
 SIMCTL_CHILD_PANCAKE_SIMULATED_SPEED_MPS="$SPEED_MPS" \
 xcrun simctl launch \
   --terminate-running-process \
@@ -198,6 +199,7 @@ sleep 2
 
 SIMCTL_CHILD_PANCAKE_SIMULATED_RUN=1 \
 SIMCTL_CHILD_PANCAKE_SIMULATED_MUSIC=1 \
+SIMCTL_CHILD_PANCAKE_SIM_TRANSITION_TEST="${PANCAKE_SIM_TRANSITION_TEST:-0}" \
 xcrun simctl launch \
   --terminate-running-process \
   --stdout="$LOG_DIR/iphone.stdout.log" \
@@ -230,6 +232,7 @@ else
 fi
 
 /usr/bin/python3 - "$COMBINED_LOG" <<'PY'
+import os
 import re
 import sys
 from pathlib import Path
@@ -278,11 +281,27 @@ if len(played) < 2:
 required_markers = [
     "PANCAKE_SIM: Watch requested Adaptive Mix",
     "PANCAKE_SIM: Watch requested next song",
-    "PANCAKE_SIM: Watch interval music action acknowledged",
-    "PANCAKE_SIM: Stale interval music action rejected",
     "PANCAKE_SIM: Watch simulated workout completed",
     "PANCAKE_SIM:SAVE_RUN_EVENT",
 ]
+if os.environ.get("PANCAKE_SIM_TRANSITION_TEST") == "1":
+    transitions = []
+    for line in lines:
+        match = re.search(r"PANCAKE_SIM:TRANSITION target=(\d+) time=([\d.]+)", line)
+        if match:
+            transitions.append((int(match.group(1)), float(match.group(2))))
+    peak_transitions = [time for target, time in transitions if target == 1]
+    if len(peak_transitions) != 1 or not 47 <= peak_transitions[0] <= 50:
+        errors.append(f"Expected exactly one Zone 5 transition at 48s, got {peak_transitions}")
+    if len(played) != 4:
+        errors.append(f"Expected initial song, automatic transition, and two manual skips; got {len(played)} songs")
+    if any("explosive" not in key for key in played[1:]):
+        errors.append("The Zone 5 transition or a later skip played an unsuitable recording")
+else:
+    required_markers.extend([
+        "PANCAKE_SIM: Watch interval music action acknowledged",
+        "PANCAKE_SIM: Stale interval music action rejected",
+    ])
 for marker in required_markers:
     if not any(marker in line for line in lines):
         errors.append(f"Missing marker: {marker}")

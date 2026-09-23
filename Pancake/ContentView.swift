@@ -9,9 +9,11 @@ import SwiftUI
 import Charts
 
 struct ContentView: View {
+    @AppStorage(DistanceUnit.preferenceKey) private var distanceUnit: DistanceUnit = .kilometers
     @StateObject private var onboarding = OnboardingManager.shared
     #if DEBUG
     @State private var showingRunSandboxFromLaunch = false
+    @State private var showingHistoryPreview = false
     #endif
 
     var body: some View {
@@ -22,11 +24,18 @@ struct ContentView: View {
                 MainAppView()
             }
         }
+        .onChange(of: distanceUnit) { _, _ in
+            WatchConnectivityWrapper.shared.syncDistanceUnit()
+        }
         #if DEBUG
         .sheet(isPresented: $showingRunSandboxFromLaunch) {
             RunSandboxView()
         }
+        .sheet(isPresented: $showingHistoryPreview) { RunReplayPreview() }
         .task {
+            if ProcessInfo.processInfo.arguments.contains("--pancake-history-preview") {
+                showingHistoryPreview = true
+            }
             if ProcessInfo.processInfo.arguments.contains("--pancake-run-sandbox") {
                 showingRunSandboxFromLaunch = true
             }
@@ -236,11 +245,12 @@ private struct RunSetupReadinessCard: View {
 
 // MARK: - Segment Creation Card
 struct SegmentCreationCard: View {
+    @AppStorage(DistanceUnit.preferenceKey) private var distanceUnit: DistanceUnit = .kilometers
     @ObservedObject var viewModel: RunSetupViewModel
     @State private var newIntensity: Intensity = .zone2
     @State private var isTimeTarget: Bool = true
     @State private var timeSeconds: Int = 300
-    @State private var distanceMeters: Int = 1000
+    @State private var distanceValue: Double = 1
     
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -307,8 +317,8 @@ struct SegmentCreationCard: View {
                             .font(.subheadline)
                             .fontWeight(.medium)
                         Spacer()
-                        Stepper(value: $distanceMeters, in: 100...42000, step: 100) {
-                            Text(distanceMeters.formattedDistanceMeters())
+                        Stepper(value: $distanceValue, in: 0.1...42, step: 0.1) {
+                            Text(distanceUnit.formattedDistance(meters: distanceUnit.meters(distance: distanceValue)))
                                 .font(.subheadline)
                                 .monospacedDigit()
                         }
@@ -329,6 +339,7 @@ struct SegmentCreationCard: View {
     }
     
     private func addSegment() {
+        let distanceMeters = Int(distanceUnit.meters(distance: distanceValue).rounded())
         let target: Target = isTimeTarget ? .time(seconds: timeSeconds) : .distance(meters: distanceMeters)
         let segment = RunSegment(intensity: newIntensity, target: target)
         viewModel.addSegment(segment)
@@ -337,6 +348,7 @@ struct SegmentCreationCard: View {
 
 // MARK: - Planned Segments Card
 struct PlannedSegmentsCard: View {
+    @AppStorage(DistanceUnit.preferenceKey) private var distanceUnit: DistanceUnit = .kilometers
     @ObservedObject var viewModel: RunSetupViewModel
     
     var body: some View {
@@ -368,7 +380,7 @@ struct PlannedSegmentsCard: View {
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         case .distance(let meters):
-                            Text(meters.formattedDistanceMeters())
+                            Text(meters.formattedDistanceMeters(unit: distanceUnit))
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -391,6 +403,7 @@ struct PlannedSegmentsCard: View {
 
 // MARK: - Workout Summary Card
 struct WorkoutSummaryCard: View {
+    @AppStorage(DistanceUnit.preferenceKey) private var distanceUnit: DistanceUnit = .kilometers
     @ObservedObject var viewModel: RunSetupViewModel
     
     var body: some View {
@@ -416,7 +429,7 @@ struct WorkoutSummaryCard: View {
                     Text("Total Distance")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Text(viewModel.totalDistanceMeters.formattedDistanceMeters())
+                    Text(viewModel.totalDistanceMeters.formattedDistanceMeters(unit: distanceUnit))
                         .font(.title2)
                         .fontWeight(.semibold)
                         .monospacedDigit()
@@ -590,6 +603,7 @@ struct HistoryView: View {
 
 // MARK: - Run Event Row View
 struct RunEventRowView: View {
+    @AppStorage(DistanceUnit.preferenceKey) private var distanceUnit: DistanceUnit = .kilometers
     let event: RunEvent
     
     var body: some View {
@@ -605,7 +619,7 @@ struct RunEventRowView: View {
             Spacer()
             
             VStack(alignment: .trailing, spacing: 4) {
-                Text(event.totalDistanceMeters.formattedDistanceMeters())
+                Text(event.totalDistanceMeters.formattedDistanceMeters(unit: distanceUnit))
                     .font(.subheadline)
                 Text(event.totalTimeSeconds.formattedTime())
                     .font(.caption)
@@ -617,7 +631,7 @@ struct RunEventRowView: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Run on \(event.date.formatted(date: .abbreviated, time: .omitted))")
-        .accessibilityValue("\(event.totalDistanceMeters.formattedDistanceMeters()) in \(event.totalTimeSeconds.formattedTime())")
+        .accessibilityValue("\(event.totalDistanceMeters.formattedDistanceMeters(unit: distanceUnit)) in \(event.totalTimeSeconds.formattedTime())")
     }
 }
 
@@ -645,7 +659,12 @@ struct EmptyHistoryView: View {
 
 // MARK: - Run Event Detail View
 struct RunEventDetailView: View {
-    let event: RunEvent
+    @AppStorage(DistanceUnit.preferenceKey) private var distanceUnit: DistanceUnit = .kilometers
+    private let originalEvent: RunEvent
+    @ObservedObject private var history = RunHistoryStore.shared
+    private var event: RunEvent { history.events.first { $0.id == originalEvent.id } ?? originalEvent }
+
+    init(event: RunEvent) { originalEvent = event }
 
     var body: some View {
         ScrollView {
@@ -668,7 +687,7 @@ struct RunEventDetailView: View {
                 ], spacing: 16) {
                     StatCardView(
                         title: "Distance",
-                        value: event.totalDistanceMeters.formattedDistanceMeters(),
+                        value: event.totalDistanceMeters.formattedDistanceMeters(unit: distanceUnit),
                         icon: "ruler"
                     )
 
@@ -695,17 +714,14 @@ struct RunEventDetailView: View {
                     }
                 }
 
-                // Charts (only for Pancake runs with detailed data)
-                if event.hasDetailedData {
-                    CombinedWorkoutChartView(
-                        dataPoints: event.dataPoints,
-                        totalDurationSeconds: event.totalTimeSeconds
-                    )
+                RunReplayView(event: event)
+
+                if event.hasDetailedData || !event.songHistory.isEmpty {
 
                     // Song Timeline
                     if !event.songHistory.isEmpty {
                         SongTimelineView(
-                            songHistory: SongTimelineView.deduplicatedSongs(event.songHistory),
+                            songHistory: RunReplayAnalysis.normalizedSongs(event.songHistory, duration: Double(event.totalTimeSeconds)),
                             totalDuration: Double(event.totalTimeSeconds),
                             allDataPoints: event.dataPoints,
                             segments: event.segments
@@ -732,194 +748,6 @@ struct RunEventDetailView: View {
     }
 }
 
-// MARK: - Combined Workout Chart View (HR + Cadence + Km markers)
-struct CombinedWorkoutChartView: View {
-    let dataPoints: [WorkoutDataPoint]
-    let totalDurationSeconds: Int
-
-    private var hrPoints: [(min: Double, value: Double)] {
-        dataPoints.compactMap { dp in
-            guard let hr = dp.heartRate else { return nil }
-            return (min: dp.timestamp / 60.0, value: Double(hr))
-        }
-    }
-
-    private var cadencePoints: [(min: Double, value: Double)] {
-        dataPoints.compactMap { dp in
-            guard let cad = dp.cadence, cad > 0 else { return nil }
-            return (min: dp.timestamp / 60.0, value: cad)
-        }
-    }
-
-    private var pacePoints: [(min: Double, value: Double)] {
-        dataPoints.compactMap { dp in
-            guard let pace = dp.paceSecondsPerKm, pace > 0 else { return nil }
-            return (min: dp.timestamp / 60.0, value: pace / 60.0)
-        }
-    }
-
-    /// Timestamps (in minutes) where each km was reached
-    private var kmMarkers: [(km: Int, min: Double)] {
-        var markers: [(km: Int, min: Double)] = []
-        var nextKm = 1000.0 // meters
-        for dp in dataPoints {
-            if dp.distanceMeters >= nextKm {
-                markers.append((km: Int(nextKm / 1000.0), min: dp.timestamp / 60.0))
-                nextKm += 1000.0
-            }
-        }
-        return markers
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            // Heart Rate + Km markers
-            if !hrPoints.isEmpty {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Text("Heart Rate")
-                            .font(.headline)
-                        Spacer()
-                        Text("bpm")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    Chart {
-                        // Km marker vertical lines
-                        ForEach(kmMarkers, id: \.km) { marker in
-                            RuleMark(x: .value("Km", marker.min))
-                                .foregroundStyle(.gray.opacity(0.4))
-                                .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
-                                .annotation(position: .top, alignment: .center) {
-                                    Text("\(marker.km) km")
-                                        .font(.system(size: 9))
-                                        .foregroundStyle(.secondary)
-                                }
-                        }
-
-                        // HR line
-                        ForEach(Array(hrPoints.enumerated()), id: \.offset) { _, point in
-                            LineMark(
-                                x: .value("Time", point.min),
-                                y: .value("HR", point.value)
-                            )
-                            .foregroundStyle(Color.pastelCoral)
-                            .interpolationMethod(.catmullRom)
-                        }
-
-                        ForEach(Array(hrPoints.enumerated()), id: \.offset) { _, point in
-                            AreaMark(
-                                x: .value("Time", point.min),
-                                y: .value("HR", point.value)
-                            )
-                            .foregroundStyle(Color.pastelCoral.opacity(0.15))
-                            .interpolationMethod(.catmullRom)
-                        }
-                    }
-                    .chartXAxisLabel("Time (min)")
-                    .frame(height: 200)
-                    .padding(.vertical, 4)
-                }
-                .padding()
-                .pastelTintedCard(.pastelLavender)
-            }
-
-            // Pace chart
-            if !pacePoints.isEmpty {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Text("Pace")
-                            .font(.headline)
-                        Spacer()
-                        Text("min/km")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    Chart {
-                        ForEach(kmMarkers, id: \.km) { marker in
-                            RuleMark(x: .value("Km", marker.min))
-                                .foregroundStyle(.gray.opacity(0.4))
-                                .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
-                        }
-
-                        ForEach(Array(pacePoints.enumerated()), id: \.offset) { _, point in
-                            LineMark(
-                                x: .value("Time", point.min),
-                                y: .value("Pace", point.value)
-                            )
-                            .foregroundStyle(Color.pastelLavender)
-                            .interpolationMethod(.catmullRom)
-                        }
-
-                        ForEach(Array(pacePoints.enumerated()), id: \.offset) { _, point in
-                            AreaMark(
-                                x: .value("Time", point.min),
-                                y: .value("Pace", point.value)
-                            )
-                            .foregroundStyle(Color.pastelLavender.opacity(0.15))
-                            .interpolationMethod(.catmullRom)
-                        }
-                    }
-                    .chartXAxisLabel("Time (min)")
-                    .chartYScale(domain: .automatic(includesZero: false))
-                    .frame(height: 160)
-                    .padding(.vertical, 4)
-                }
-                .padding()
-                .pastelTintedCard(.pastelLavender)
-            }
-
-            // Cadence chart
-            if !cadencePoints.isEmpty {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Text("Cadence")
-                            .font(.headline)
-                        Spacer()
-                        Text("spm")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    Chart {
-                        ForEach(kmMarkers, id: \.km) { marker in
-                            RuleMark(x: .value("Km", marker.min))
-                                .foregroundStyle(.gray.opacity(0.4))
-                                .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
-                        }
-
-                        ForEach(Array(cadencePoints.enumerated()), id: \.offset) { _, point in
-                            LineMark(
-                                x: .value("Time", point.min),
-                                y: .value("Cadence", point.value)
-                            )
-                            .foregroundStyle(Color.pastelSky)
-                            .interpolationMethod(.catmullRom)
-                        }
-
-                        ForEach(Array(cadencePoints.enumerated()), id: \.offset) { _, point in
-                            AreaMark(
-                                x: .value("Time", point.min),
-                                y: .value("Cadence", point.value)
-                            )
-                            .foregroundStyle(Color.pastelSky.opacity(0.15))
-                            .interpolationMethod(.catmullRom)
-                        }
-                    }
-                    .chartXAxisLabel("Time (min)")
-                    .chartYScale(domain: .automatic(includesZero: false))
-                    .frame(height: 140)
-                    .padding(.vertical, 4)
-                }
-                .padding()
-                .pastelTintedCard(.pastelLavender)
-            }
-        }
-    }
-}
-
 // MARK: - Song Timeline View
 struct SongTimelineView: View {
     let songHistory: [SongPeriod]
@@ -929,7 +757,7 @@ struct SongTimelineView: View {
 
     @State private var expandedIndex: Int? = nil
 
-    private let colors: [Color] = [.pastelPeriwinkle, .pastelMint, .pastelPeach, .pastelLavender, .pastelRose, .pastelSky, .pastelLemon, .pastelLilac]
+    private let colors = RunReplayPalette.songs
 
     /// Deduplicates song entries that have the same title+artist with timestamps within 30 seconds
     static func deduplicatedSongs(_ songs: [SongPeriod]) -> [SongPeriod] {
@@ -1061,6 +889,7 @@ struct SongTimelineView: View {
 
 // MARK: - Song Detail View (Expandable)
 struct SongDetailView: View {
+    @AppStorage(DistanceUnit.preferenceKey) private var distanceUnit: DistanceUnit = .kilometers
     let period: SongPeriod
     let dataPoints: [WorkoutDataPoint]
     let segments: [RunSegment]
@@ -1079,12 +908,10 @@ struct SongDetailView: View {
     }
 
     private var avgPace: String? {
-        let paces = relevantDataPoints.compactMap { $0.paceSecondsPerKm }
-        guard !paces.isEmpty else { return nil }
-        let avgSeconds = paces.reduce(0, +) / Double(paces.count)
-        let mins = Int(avgSeconds) / 60
-        let secs = Int(avgSeconds) % 60
-        return String(format: "%d:%02d/km", mins, secs)
+        guard let first = relevantDataPoints.first, let last = relevantDataPoints.last,
+              last.timestamp > first.timestamp, last.distanceMeters > first.distanceMeters else { return nil }
+        let avgSeconds = (last.timestamp - first.timestamp) * 1000 / (last.distanceMeters - first.distanceMeters)
+        return distanceUnit.formattedPace(secondsPerKm: avgSeconds)
     }
 
     private var avgCadence: Int? {
@@ -1095,8 +922,7 @@ struct SongDetailView: View {
 
     private var distanceAtStart: String {
         if let dp = dataPoints.last(where: { $0.timestamp <= period.startTimestamp }) {
-            let km = dp.distanceMeters / 1000.0
-            return String(format: "%.2f km", km)
+            return distanceUnit.formattedDistance(meters: dp.distanceMeters)
         }
         return "--"
     }
@@ -1251,6 +1077,7 @@ struct StatCardView: View {
 
 // MARK: - Segment Row View
 struct SegmentRowView: View {
+    @AppStorage(DistanceUnit.preferenceKey) private var distanceUnit: DistanceUnit = .kilometers
     let segment: RunSegment
     let index: Int
     
@@ -1275,7 +1102,7 @@ struct SegmentRowView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 case .distance(let meters):
-                    Text(meters.formattedDistanceMeters())
+                    Text(meters.formattedDistanceMeters(unit: distanceUnit))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

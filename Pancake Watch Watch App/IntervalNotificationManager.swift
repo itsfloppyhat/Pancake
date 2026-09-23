@@ -20,6 +20,7 @@ final class IntervalNotificationManager: NSObject, ObservableObject {
     private var notificationID: String?
     private var notificationRunID: UUID?
     private var pendingControlID: UUID?
+    private var dismissTask: Task<Void, Never>?
 
     private override init() {
         super.init()
@@ -55,6 +56,7 @@ final class IntervalNotificationManager: NSObject, ObservableObject {
         guard isCurrent(interval) else { return }
         clearInterval()
         currentInterval = interval
+        scheduleDismissal(for: interval)
 
         // SwiftUI presents the controls immediately while the app is visible.
         // Away from the app, the system alert exposes the same explicit choices.
@@ -81,6 +83,8 @@ final class IntervalNotificationManager: NSObject, ObservableObject {
            currentInterval?.runID != runID,
            notificationRunID != runID { return }
         currentInterval = nil
+        dismissTask?.cancel()
+        dismissTask = nil
         musicControlError = nil
         isSendingControl = false
         pendingControlID = nil
@@ -116,6 +120,17 @@ final class IntervalNotificationManager: NSObject, ObservableObject {
         sendMusicControl(WatchConnectivityManager.shared.isAdaptiveMixActive ? "next" : "suggest", for: interval)
     }
 
+    private func scheduleDismissal(for interval: IntervalChangePrompt) {
+        dismissTask?.cancel()
+        dismissTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(WorkoutAlertTiming.displayDuration))
+            } catch { return }
+            guard let self, self.currentInterval?.id == interval.id else { return }
+            self.clearInterval(for: interval.runID)
+        }
+    }
+
     private func isCurrent(_ interval: IntervalChangePrompt) -> Bool {
         let workout = WorkoutSessionManager.shared
         return interval.isCurrent(runID: workout.activeRunID, segmentIndex: workout.currentSegmentIndex, isRunning: workout.isRunning)
@@ -144,6 +159,7 @@ final class IntervalNotificationManager: NSObject, ObservableObject {
             return
         }
         currentInterval = interval
+        scheduleDismissal(for: interval)
         switch response.actionIdentifier {
         case Self.nextActionID: nextSong(for: interval)
         case Self.playActionID: sendMusicControl("play", for: interval)

@@ -218,9 +218,7 @@ struct RunEvent: Identifiable, Codable, Equatable, Hashable {
 
     var formattedPace: String? {
         guard let pace = averagePacePerKm else { return nil }
-        let minutes = Int(pace) / 60
-        let seconds = Int(pace) % 60
-        return String(format: "%d:%02d/km", minutes, seconds)
+        return DistanceUnit.preferred.formattedPace(secondsPerKm: pace)
     }
 
     func hash(into hasher: inout Hasher) {
@@ -285,17 +283,8 @@ extension Int {
         }
     }
 
-    func formattedDistanceMeters() -> String {
-        if self >= 1000 {
-            let km = Double(self) / 1000.0
-            if km == floor(km) {
-                return String(format: "%.0f km", km)
-            } else {
-                return String(format: "%.1f km", km)
-            }
-        } else {
-            return "\(self) m"
-        }
+    func formattedDistanceMeters(unit: DistanceUnit = .preferred) -> String {
+        unit.formattedTarget(meters: self)
     }
 }
 
@@ -357,4 +346,36 @@ struct MusicSong: Identifiable, Codable, Equatable {
         self.energy = energy
         self.valence = valence
     }
+}
+
+// MARK: - Recorded GPS route
+/// Active workout time (pauses excluded) keeps location, metrics and music aligned.
+struct RunRoutePoint: Codable, Equatable, Hashable {
+    let timestamp: TimeInterval
+    let latitude: Double
+    let longitude: Double
+    let horizontalAccuracy: Double
+    let distanceMeters: Double
+    let heartRate: Int?
+    let targetHeartRate: Int?
+    let speedMetersPerSecond: Double?
+    let startsNewSection: Bool
+
+    var isValid: Bool {
+        timestamp.isFinite && timestamp >= 0 &&
+        latitude.isFinite && (-90...90).contains(latitude) &&
+        longitude.isFinite && (-180...180).contains(longitude) &&
+        horizontalAccuracy.isFinite && (0...50).contains(horizontalAccuracy) &&
+        distanceMeters.isFinite && distanceMeters >= 0
+    }
+}
+
+/// Transferred as a file so a long run never exceeds WatchConnectivity's message limit.
+struct RunRouteArchive: Codable {
+    let runID: UUID
+    let startedAt: Date
+    let totalDistanceMeters: Int
+    let totalTimeSeconds: Int
+    let segments: [RunSegment]
+    let points: [RunRoutePoint]
 }

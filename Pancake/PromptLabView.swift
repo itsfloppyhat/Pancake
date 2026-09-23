@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct PromptLabView: View {
+    @AppStorage(DistanceUnit.preferenceKey) private var distanceUnit: DistanceUnit = .kilometers
     @StateObject private var viewModel = PromptLabViewModel()
     @Environment(\.dismiss) private var dismiss
 
@@ -181,8 +182,11 @@ struct PromptLabView: View {
 
             PromptLabSliderRow(
                 title: "Distance",
-                valueText: String(format: "%.1f km", viewModel.currentDistance),
-                value: $viewModel.currentDistance,
+                valueText: distanceUnit.formattedDistance(meters: viewModel.currentDistance * 1000, decimals: 1),
+                value: Binding(
+                    get: { distanceUnit.distance(meters: viewModel.currentDistance * 1000) },
+                    set: { viewModel.currentDistance = distanceUnit.meters(distance: $0) / 1000 }
+                ),
                 range: 0...30,
                 step: 0.1
             )

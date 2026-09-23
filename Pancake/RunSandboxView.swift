@@ -5,6 +5,7 @@ import SwiftUI
 /// run on a real device. Drives the production coordinator through the same
 /// messages the watch sends; playback is real Apple Music.
 struct RunSandboxView: View {
+    @AppStorage(DistanceUnit.preferenceKey) private var distanceUnit: DistanceUnit = .kilometers
     @StateObject private var driver = RunSandboxDriver.shared
     @StateObject private var recorder = AdaptiveMixEvalRecorder.shared
     @StateObject private var coordinator = WorkoutMusicCoordinator.shared
@@ -81,7 +82,7 @@ struct RunSandboxView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 sandboxMetric("Time", Int(driver.totalTime).formattedTime())
-                sandboxMetric("Distance", String(format: "%.2f km", driver.totalDistanceMeters / 1000))
+                sandboxMetric("Distance", distanceUnit.formattedDistance(meters: driver.totalDistanceMeters))
                 sandboxMetric("Segment", "\(driver.currentSegmentIndex + 1)/\(driver.plannedSegments.count)")
             }
 
@@ -134,7 +135,7 @@ struct RunSandboxView: View {
                 Text("Speed")
                     .font(.headline)
                 Spacer()
-                Text(String(format: "%.1f m/s · %@/km", driver.speedMetersPerSecond, paceText))
+                Text(String(format: "%.1f m/s · %@/%@", driver.speedMetersPerSecond, paceText, distanceUnit.symbol))
                     .font(.subheadline)
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
@@ -236,7 +237,7 @@ struct RunSandboxView: View {
     private var paceText: String {
         guard driver.speedMetersPerSecond > 0 else { return "-" }
         let secondsPerKm = 1000.0 / driver.speedMetersPerSecond
-        return "\(Int(secondsPerKm) / 60):" + String(format: "%02d", Int(secondsPerKm) % 60)
+        return distanceUnit.formattedPace(secondsPerKm: secondsPerKm, includeUnit: false)
     }
 
     private var heartRateColor: Color {

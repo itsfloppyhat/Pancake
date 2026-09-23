@@ -6,6 +6,7 @@ PANCAKE_TEST_BUILD="$(mktemp -d "${TMPDIR:-/tmp}/pancake-history-tests.XXXXXX")"
 trap 'rm -rf "$PANCAKE_TEST_BUILD"' EXIT
 
 xcrun swiftc -parse-as-library \
+  "$PANCAKE_ROOT/Shared/DistanceUnit.swift" \
   "$PANCAKE_ROOT/Pancake/Models/RunModels.swift" \
   "$PANCAKE_ROOT/Pancake/ActiveRunStateStore.swift" \
   "$PANCAKE_ROOT/Pancake/RunHistoryRepository.swift" \

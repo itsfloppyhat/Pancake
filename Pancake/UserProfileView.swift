@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct UserProfileView: View {
+    @AppStorage(DistanceUnit.preferenceKey) private var distanceUnit: DistanceUnit = .kilometers
     @Environment(\.openURL) private var openURL
     @StateObject private var viewModel = UserProfileViewModel()
     @StateObject private var onboarding = OnboardingManager.shared
@@ -22,6 +23,21 @@ struct UserProfileView: View {
                     
                     // Settings Sections
                     VStack(spacing: 16) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Label("Distance Units", systemImage: "ruler")
+                                .font(.headline)
+                            Picker("Distance Units", selection: $distanceUnit) {
+                                ForEach(DistanceUnit.allCases) { unit in
+                                    Text(unit.label).tag(unit)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                            Text("Used for distance, pace, and watch milestones.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .pastelTintedCard(.pastelSky)
+
                         SettingsSectionView(
                             title: "Setup Guide",
                             subtitle: onboarding.activationReady ? "Ready for your first run" : "Finish first-run setup",
@@ -42,7 +58,7 @@ struct UserProfileView: View {
 
                         SettingsSectionView(
                             title: "Running Goals",
-                            subtitle: String(format: "%.1f km/week", viewModel.userProfile.runningGoals.weeklyDistanceGoal),
+                            subtitle: distanceUnit.formattedDistance(meters: viewModel.userProfile.runningGoals.weeklyDistanceGoal * 1000, decimals: 1) + "/week",
                             icon: "target",
                             color: .pastelMint
                         ) {
@@ -220,6 +236,7 @@ struct ProfileHeaderView: View {
 
 // MARK: - Quick Stats View
 struct QuickStatsView: View {
+    @AppStorage(DistanceUnit.preferenceKey) private var distanceUnit: DistanceUnit = .kilometers
     let profile: UserProfile
     
     var body: some View {
@@ -241,7 +258,7 @@ struct QuickStatsView: View {
             
             StatCardView(
                 title: "Weekly Goal",
-                value: String(format: "%.1f km", profile.runningGoals.weeklyDistanceGoal),
+                value: distanceUnit.formattedDistance(meters: profile.runningGoals.weeklyDistanceGoal * 1000, decimals: 1),
                 icon: "target"
             )
             
@@ -741,6 +758,7 @@ struct MoodPreferenceRowView: View {
 
 // MARK: - Running Goals View
 struct RunningGoalsView: View {
+    @AppStorage(DistanceUnit.preferenceKey) private var distanceUnit: DistanceUnit = .kilometers
     @StateObject private var profileManager = UserProfileManager.shared
     @Environment(\.dismiss) private var dismiss
     @State private var goals: RunningGoals
@@ -756,9 +774,14 @@ struct RunningGoalsView: View {
                     HStack {
                         Text("Distance Goal")
                         Spacer()
-                        TextField("km", value: $goals.weeklyDistanceGoal, format: .number)
+                        TextField(distanceUnit.symbol, value: Binding(
+                            get: { distanceUnit.distance(meters: goals.weeklyDistanceGoal * 1000) },
+                            set: { goals.weeklyDistanceGoal = distanceUnit.meters(distance: $0) / 1000 }
+                        ), format: .number)
+                            .accessibilityLabel("Weekly distance in \(distanceUnit.label.lowercased())")
                             .keyboardType(.decimalPad)
                             .multilineTextAlignment(.trailing)
+                        Text(distanceUnit.symbol).foregroundStyle(.secondary)
                     }
                     
                     HStack {
@@ -772,9 +795,12 @@ struct RunningGoalsView: View {
                 
                 Section("Target Pace") {
                     HStack {
-                        Text("Pace per Kilometer")
+                        Text("Seconds per \(distanceUnit.singular)")
                         Spacer()
-                        TextField("mm:ss", value: $goals.targetPace, format: .number)
+                        TextField("seconds", value: Binding(
+                            get: { distanceUnit.pace(secondsPerKm: goals.targetPace) },
+                            set: { goals.targetPace = $0 * 1000 / distanceUnit.metersPerUnit }
+                        ), format: .number)
                             .keyboardType(.decimalPad)
                             .multilineTextAlignment(.trailing)
                     }
@@ -1308,6 +1334,7 @@ struct SongSearchRowView: View {
 
 // MARK: - HealthKit Import Section
 struct HealthKitImportSectionView: View {
+    @AppStorage(DistanceUnit.preferenceKey) private var distanceUnit: DistanceUnit = .kilometers
     @StateObject private var historyViewModel = HistoryViewModel()
     @State private var showingImportAlert = false
     @State private var showingClearAlert = false
@@ -1395,7 +1422,7 @@ struct HealthKitImportSectionView: View {
                 }
             }
         } message: {
-            Text("This will import all running workouts from Health that are longer than 0.5km. Duplicate runs will be automatically filtered out.")
+            Text("This will import all running workouts from Health that are longer than \(distanceUnit.formattedDistance(meters: 500)). Duplicate runs will be automatically filtered out.")
         }
         .alert("Clear All Data", isPresented: $showingClearAlert) {
             Button("Cancel", role: .cancel) { }

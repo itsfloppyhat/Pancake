@@ -4,25 +4,6 @@ import CoreLocation
 import WatchConnectivity
 import WatchKit
 
-private enum WatchAdaptiveMixPolicy {
-    static let upcomingIntervalLeadTime: TimeInterval = 10
-
-    static func shouldPrecurateUpcomingInterval(
-        estimatedSecondsRemaining: TimeInterval?,
-        hasUpcomingInterval: Bool,
-        alreadyPrecurated: Bool
-    ) -> Bool {
-        guard hasUpcomingInterval,
-              !alreadyPrecurated,
-              let estimatedSecondsRemaining else {
-            return false
-        }
-
-        return estimatedSecondsRemaining > 0 &&
-            estimatedSecondsRemaining <= upcomingIntervalLeadTime
-    }
-}
-
 // MARK: - GPS Status
 enum GPSStatus: String, CaseIterable {
     case unknown = "unknown"
@@ -117,6 +98,8 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
     
     // GPS smoothing
     private var locationBuffer: [CLLocation] = []
+    private var recordedRoute: [RunRoutePoint] = []
+    private var routeSectionBreak = true
     private let maxBufferSize = 10
     private let minAccuracyThreshold: CLLocationAccuracy = 100.0
 
@@ -133,11 +116,12 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
     private var iPhoneUpdateTimer: Timer?
     private var simulatedMetricsTimer: Timer?
 
-    // Km milestone notification
-    @Published var showKmMilestone: Bool = false
-    @Published var lastKmMilestone: Int = 0
-    private var lastNotifiedKm: Int = 0
-    private var kmDismissTimer: Timer?
+    // Distance milestone notification
+    @Published var showDistanceMilestone: Bool = false
+    @Published var lastDistanceMilestone: Int = 0
+    private var distanceMilestones = DistanceMilestoneTracker(unit: .preferred)
+    @Published private(set) var milestoneUnit: DistanceUnit = .preferred
+    private var distanceDismissTimer: Timer?
     
     // MARK: - Live Metrics
     @Published private(set) var heartRate: Double?
@@ -152,6 +136,7 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
     @Published var error: Error?
     @Published private(set) var activeRunID: UUID?
     @Published private(set) var activeRunStartedAt: Date?
+    private(set) var shouldStartAdaptiveMix = false
     @Published private(set) var completedSummary: WorkoutSummary?
     private static let completedSummaryKey = "WorkoutSessionManager.completedSummary"
     private var pausedAt: Date?
@@ -169,6 +154,7 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
     private var segmentStartTime: Date?
     private var segmentStartDistance: Double = 0
     private var lastPrecuratedUpcomingSegmentIndex: Int?
+    private var lastMusicTransitionSegmentIndex: Int?
     private static let simulatedRunArgument = "--pancake-simulated-run"
     private static let simulatedRunEnvironmentKey = "PANCAKE_SIMULATED_RUN"
     private static let simulatedSpeedEnvironmentKey = "PANCAKE_SIMULATED_SPEED_MPS"
@@ -224,7 +210,7 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
         }
     }
     
-    func startOutdoorRun(segments: [RunSegment]) {
+    func startOutdoorRun(segments: [RunSegment], startAdaptiveMix: Bool = false) {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
 
@@ -239,6 +225,7 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
             }
 
             self.prepareForNewRun()
+            self.shouldStartAdaptiveMix = startAdaptiveMix
 
             if Self.isSimulatedRunEnabled {
                 self.startSimulatedOutdoorRun(segments: segments)
@@ -254,6 +241,7 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
             self.segmentStartTime = Date()
             self.segmentStartDistance = 0
             self.lastPrecuratedUpcomingSegmentIndex = nil
+            self.lastMusicTransitionSegmentIndex = nil
 
             // Clear any previous errors
             self.error = nil
@@ -346,10 +334,13 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
         activeCalories = 0
         locations = []
         locationBuffer = []
+        recordedRoute = []
+        routeSectionBreak = true
         gpsAccuracy = nil
-        lastNotifiedKm = 0
-        lastKmMilestone = 0
-        showKmMilestone = false
+        distanceMilestones = DistanceMilestoneTracker(unit: .preferred)
+        milestoneUnit = .preferred
+        lastDistanceMilestone = 0
+        showDistanceMilestone = false
         Task { @MainActor in
             IntervalNotificationManager.shared.clearInterval()
             if !Self.isSimulatedRunEnabled {
@@ -369,6 +360,7 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
         sessionToEnd?.end()
         activeRunID = nil
         activeRunStartedAt = nil
+        shouldStartAdaptiveMix = false
 
         locationManager.stopUpdatingLocation()
         stopWorkoutTimer()
@@ -399,6 +391,7 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
 
     private static var simulatedSpeedMetersPerSecond: Double {
         #if DEBUG
+        if ProcessInfo.processInfo.environment["PANCAKE_SIM_TRANSITION_TEST"] == "1" { return 0 }
         if let rawValue = ProcessInfo.processInfo.environment[simulatedSpeedEnvironmentKey],
            let speed = Double(rawValue),
            speed > 0 {
@@ -416,6 +409,7 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
         segmentStartTime = Date()
         segmentStartDistance = 0
         lastPrecuratedUpcomingSegmentIndex = nil
+        lastMusicTransitionSegmentIndex = nil
         simulatedHeartRateIndex = 0
 
         error = nil
@@ -486,7 +480,8 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
 
         let baseHeartRate = targetHeartRate ?? currentSegment?.intensity.defaultTargetHeartRate ?? 138
         let patternDelta = Self.simulatedHeartRates[simulatedHeartRateIndex % Self.simulatedHeartRates.count] - 146
-        let simulatedHeartRate = max(105, min(184, baseHeartRate + patternDelta))
+        let simulatedHeartRate = ProcessInfo.processInfo.environment["PANCAKE_SIM_TRANSITION_TEST"] == "1"
+            ? 70 : max(105, min(184, baseHeartRate + patternDelta))
         simulatedHeartRateIndex += 1
         heartRate = Double(simulatedHeartRate)
         currentHeartRate = simulatedHeartRate
@@ -502,6 +497,7 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
         )
         locations.append(location)
         locations = Array(locations.suffix(200))
+        recordRouteLocation(location, speed: speed)
     }
 
     private func simulatedCoordinate(distanceMeters: Double) -> CLLocationCoordinate2D {
@@ -536,8 +532,8 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
                 // Check for segment completion
                 self.checkForSegmentCompletion()
 
-                // Check for km milestones
-                self.checkForKmMilestone()
+                // Check for distance milestones
+                self.checkForDistanceMilestone()
 
                 // Warn if HealthKit never starts delivering heart-rate samples.
                 self.checkForHeartRateSignal()
@@ -604,23 +600,19 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
     }
 
     private func checkForUpcomingIntervalCuration() {
-        let upcomingSegmentIndex = currentSegmentIndex + 1
-        let alreadyPrecurated = lastPrecuratedUpcomingSegmentIndex == upcomingSegmentIndex
-        let hasUpcomingInterval = upcomingSegmentIndex < plannedSegments.count
-
-        guard WatchAdaptiveMixPolicy.shouldPrecurateUpcomingInterval(
-            estimatedSecondsRemaining: estimatedSecondsUntilCurrentSegmentEnds,
-            hasUpcomingInterval: hasUpcomingInterval,
-            alreadyPrecurated: alreadyPrecurated
-        ) else {
-            return
+        let upcomingIndex = currentSegmentIndex + 1
+        guard upcomingIndex < plannedSegments.count else { return }
+        let remaining = estimatedSecondsUntilCurrentSegmentEnds
+        if lastPrecuratedUpcomingSegmentIndex != upcomingIndex,
+           AdaptiveMixTransitionPolicy.isWithin(AdaptiveMixTransitionPolicy.preparationLeadTime, secondsRemaining: remaining) {
+            lastPrecuratedUpcomingSegmentIndex = upcomingIndex
+            sendWorkoutSnapshotToiPhone(reason: "prepare upcoming interval music")
         }
-
-        lastPrecuratedUpcomingSegmentIndex = upcomingSegmentIndex
-        sendWorkoutSnapshotToiPhone(
-            reason: "upcoming interval curation",
-            adaptiveMixCurationTargetSegmentIndex: upcomingSegmentIndex
-        )
+        if lastMusicTransitionSegmentIndex != upcomingIndex,
+           AdaptiveMixTransitionPolicy.isWithin(AdaptiveMixTransitionPolicy.playbackLeadTime, secondsRemaining: remaining) {
+            lastMusicTransitionSegmentIndex = upcomingIndex
+            sendWorkoutSnapshotToiPhone(reason: "transition upcoming interval music")
+        }
     }
 
     var estimatedSecondsUntilCurrentSegmentEnds: TimeInterval? {
@@ -643,24 +635,26 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
         }
     }
     
-    private func checkForKmMilestone() {
-        let currentKm = Int(displayedDistanceKm)
-        guard currentKm > lastNotifiedKm && currentKm > 0 else { return }
-
-        lastNotifiedKm = currentKm
-        lastKmMilestone = currentKm
-        showKmMilestone = true
+    private func checkForDistanceMilestone() {
+        let unit = DistanceUnit.preferred
+        if distanceMilestones.unit != unit { showDistanceMilestone = false }
+        guard let milestone = distanceMilestones.update(meters: displayedDistanceKm * 1000, unit: unit) else { return }
+        lastDistanceMilestone = milestone
+        milestoneUnit = unit
+        showDistanceMilestone = true
 
         // Haptic feedback
         WKInterfaceDevice.current().play(.notification)
 
         // Auto-dismiss after 4 seconds
-        kmDismissTimer?.invalidate()
-        kmDismissTimer = Timer.scheduledTimer(withTimeInterval: 4.0, repeats: false) { [weak self] _ in
+        distanceDismissTimer?.invalidate()
+        let timer = Timer(timeInterval: WorkoutAlertTiming.displayDuration, repeats: false) { [weak self] _ in
             DispatchQueue.main.async {
-                self?.showKmMilestone = false
+                self?.showDistanceMilestone = false
             }
         }
+        distanceDismissTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
     }
 
     private func checkForHeartRateSignal() {
@@ -705,6 +699,7 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
             "type": WatchMessageType.workoutStart.rawValue,
             "runID": activeRunID.uuidString,
             "startedAt": activeRunStartedAt.timeIntervalSince1970,
+            "startAdaptiveMix": shouldStartAdaptiveMix,
             "segments": plannedSegments.map { segment in
                 [
                     "intensity": segment.intensity.rawValue,
@@ -761,6 +756,10 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
             "totalDistance": totalDistance,
             "totalTime": totalTime
         ]
+
+        if let remaining = estimatedSecondsUntilCurrentSegmentEnds {
+            updateMessage["estimatedSecondsRemaining"] = remaining
+        }
 
         if let activeRunID {
             updateMessage["runID"] = activeRunID.uuidString
@@ -846,6 +845,7 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
         guard !isPaused else { return }
         isPaused = true
         pausedAt = Date()
+        routeSectionBreak = true
     }
 
     /// Shifting the start anchors forward by the paused duration keeps every
@@ -885,6 +885,15 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
         let segments = plannedSegments
         let sessionToEnd = session
         let builderToFinish = builder
+        do {
+            try WatchRunRouteTransfer.save(RunRouteArchive(
+                runID: runID, startedAt: startedAt,
+                totalDistanceMeters: Int(distanceKm * 1000), totalTimeSeconds: totalSeconds,
+                segments: segments, points: recordedRoute
+            ))
+        } catch {
+            print("Could not save the run's GPS route: \(error.localizedDescription)")
+        }
         activeRunID = nil
         session = nil
         builder = nil
@@ -921,9 +930,9 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
         stopWorkoutTimer()
         stopIPhoneUpdateTimer()
         stopSimulatedMetricsTimer()
-        kmDismissTimer?.invalidate()
-        kmDismissTimer = nil
-        showKmMilestone = false
+        distanceDismissTimer?.invalidate()
+        distanceDismissTimer = nil
+        showDistanceMilestone = false
         isStarting = false
         isRunning = false
         isPaused = false
@@ -933,6 +942,7 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
         segmentStartTime = nil
         activeRunStartedAt = nil
         totalTime = TimeInterval(totalSeconds)
+        shouldStartAdaptiveMix = false
         Task { @MainActor in
             IntervalNotificationManager.shared.clearInterval(for: runID)
         }
@@ -1029,10 +1039,17 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
     // MARK: - CLLocationManagerDelegate
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
         // Filter and smooth locations
-        let validLocations = locations.filter { $0.horizontalAccuracy <= minAccuracyThreshold }
+        let validLocations = locations.filter {
+            $0.horizontalAccuracy >= 0 && $0.horizontalAccuracy <= minAccuracyThreshold &&
+            abs($0.timestamp.timeIntervalSinceNow) < 15 && CLLocationCoordinate2DIsValid($0.coordinate)
+        }
         
         DispatchQueue.main.async { [weak self] in
-            guard let self = self, self.isRunning else { return }
+            guard let self = self, self.isRunning, !self.isPaused else { return }
+
+            if let latest = validLocations.max(by: { $0.timestamp < $1.timestamp }) {
+                self.recordRouteLocation(latest)
+            }
             
             // Update GPS status based on best accuracy
             if let bestLocation = validLocations.min(by: { $0.horizontalAccuracy < $1.horizontalAccuracy }) {
@@ -1097,6 +1114,33 @@ final class WorkoutSessionManager: NSObject, ObservableObject, CLLocationManager
             verticalAccuracy: locationBuffer.last?.verticalAccuracy ?? -1,
             timestamp: latestTimestamp
         )
+    }
+
+    private func recordRouteLocation(_ location: CLLocation, speed: Double? = nil) {
+        guard isRunning, !isPaused, let anchor = workoutStartDate,
+              location.horizontalAccuracy >= 0, location.horizontalAccuracy <= 50 else { return }
+        let timestamp = location.timestamp.timeIntervalSince(anchor)
+        guard timestamp >= 0, recordedRoute.count < 50_000 else { return }
+        if let last = recordedRoute.last, timestamp - last.timestamp < 3 { return }
+        if let last = recordedRoute.last, timestamp - last.timestamp <= 20 {
+            let previous = CLLocation(latitude: last.latitude, longitude: last.longitude)
+            if location.distance(from: previous) > max(50, (timestamp - last.timestamp) * 15) {
+                routeSectionBreak = true
+                return
+            }
+        }
+        let measuredSpeed = speed ?? (location.speed >= 0 ? location.speed : nil)
+        let point = RunRoutePoint(
+            timestamp: timestamp, latitude: location.coordinate.latitude, longitude: location.coordinate.longitude,
+            horizontalAccuracy: location.horizontalAccuracy, distanceMeters: displayedDistanceKm * 1000,
+            heartRate: lastHeartRateSampleAt.map { Date().timeIntervalSince($0) <= Self.heartRateStalenessInterval } == true ? currentHeartRate : nil,
+            targetHeartRate: targetHeartRate,
+            speedMetersPerSecond: measuredSpeed.flatMap { $0.isFinite && $0 <= 12 ? $0 : nil },
+            startsNewSection: routeSectionBreak || recordedRoute.last.map { timestamp - $0.timestamp > 20 } == true
+        )
+        guard point.isValid else { return }
+        recordedRoute.append(point)
+        routeSectionBreak = false
     }
     
     func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {

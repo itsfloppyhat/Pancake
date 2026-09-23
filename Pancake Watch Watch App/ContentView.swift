@@ -1,11 +1,14 @@
 import SwiftUI
+import WatchKit
 
 struct ContentView: View {
     @StateObject private var healthKit = HealthKitManager.shared
     @StateObject private var workoutManager = WorkoutSessionManager.shared
     @StateObject private var watchConnectivity = WatchConnectivityManager.shared
     @StateObject private var launchCoordinator = WatchWorkoutLaunchCoordinator.shared
+    @Environment(\.scenePhase) private var scenePhase
 
+    @State private var startFlow = WatchWorkoutStartFlow()
     @State private var showWorkoutProgress = false
     @State private var isStartAttemptActive = false
     @State private var hasSentWorkoutStarted = false
@@ -21,16 +24,14 @@ struct ContentView: View {
                 } else if watchConnectivity.hasReceivedRunPlan {
                     ReceivedPlanView(
                         segments: watchConnectivity.receivedRunPlan,
-                        isStarting: workoutManager.isStarting,
+                        isStarting: isPreparingToStart,
                         onStartWorkout: startWorkout,
                         onDismissPlan: dismissPlan
                     )
                 } else {
                     WaitingForPlanView(
                         isReachable: watchConnectivity.isReachable,
-                        isStarting: workoutManager.isStarting,
-                        isAwaitingPlanFromPhone: launchCoordinator.wasLaunchedFromPhone,
-                        onQuickRun: startQuickRun
+                        isAwaitingPlanFromPhone: launchCoordinator.wasLaunchedFromPhone
                     )
                 }
             }
@@ -42,12 +43,33 @@ struct ContentView: View {
                 }
                 .background(Color.black)
                 .ignoresSafeArea()
-            } else if workoutManager.isStarting {
+            } else if startFlow.phase == .choosingMusic {
+                AdaptivePlaylistStartPrompt(
+                    onChoice: { startFlow.chooseMusic($0) },
+                    onCancel: { startFlow.cancelPreparation() }
+                )
+                .background(Color.black.ignoresSafeArea())
+            } else if case .countingDown(let remaining) = startFlow.phase {
+                WorkoutCountdownView(remaining: remaining) {
+                    startFlow.cancelPreparation()
+                }
+                .background(Color.black.ignoresSafeArea())
+            } else if workoutManager.isStarting || startFlow.phase == .starting {
                 StartingWorkoutView()
                     .background(Color.black)
                     .ignoresSafeArea()
             }
         }
+        .task(id: startFlow.countdownAttemptID) {
+            guard let attemptID = startFlow.countdownAttemptID else { return }
+            await countDownToWorkout(attemptID: attemptID)
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .background {
+                startFlow.cancelPreparation()
+            }
+        }
+        .onDisappear { startFlow.cancelPreparation() }
         .onChange(of: watchConnectivity.hasReceivedRunPlan) { _, hasPlan in
             if hasPlan {
                 launchCoordinator.clearLaunchFromPhone()
@@ -62,6 +84,7 @@ struct ContentView: View {
             }
 
             isStartAttemptActive = false
+            startFlow.reset()
             startErrorMessage = nil
             launchCoordinator.clearLaunchFromPhone()
 
@@ -71,7 +94,8 @@ struct ContentView: View {
                     WatchConnectivityManager.shared.sendWorkoutStarted(
                         runID: runID,
                         startedAt: startedAt,
-                        segments: workoutManager.plannedSegments
+                        segments: workoutManager.plannedSegments,
+                        startAdaptiveMix: workoutManager.shouldStartAdaptiveMix
                     )
                 }
                 hasSentWorkoutStarted = true
@@ -80,10 +104,12 @@ struct ContentView: View {
             withAnimation(.easeInOut(duration: 0.2)) {
                 showWorkoutProgress = true
             }
+            WKInterfaceDevice.current().play(.start)
         }
         .onChange(of: workoutManager.error?.localizedDescription) { _, message in
             guard isStartAttemptActive, let message else { return }
             isStartAttemptActive = false
+            startFlow.reset()
             startErrorMessage = message
         }
         .alert("Couldn’t Start Workout", isPresented: Binding(
@@ -105,29 +131,44 @@ struct ContentView: View {
         #endif
     }
 
-    private func startWorkout() {
-        guard !workoutManager.isStarting else { return }
-        let segments = watchConnectivity.receivedRunPlan
-        isStartAttemptActive = true
-        hasSentWorkoutStarted = false
-        startErrorMessage = nil
-        workoutManager.startOutdoorRun(segments: segments)
+    private var isPreparingToStart: Bool {
+        startFlow.phase != .idle || workoutManager.isStarting
     }
 
-    /// Starts an easy run without an iPhone plan. Matches the default context
-    /// the iPhone assumes when a workout starts without a received plan.
-    private func startQuickRun() {
-        guard !workoutManager.isStarting else { return }
-        isStartAttemptActive = true
+    private func startWorkout() {
+        prepareToStart(segments: watchConnectivity.receivedRunPlan)
+    }
+
+    private func prepareToStart(segments: [RunSegment]) {
+        guard !workoutManager.isStarting, !workoutManager.isRunning,
+              startFlow.begin(segments: segments) else { return }
         hasSentWorkoutStarted = false
         startErrorMessage = nil
-        workoutManager.startOutdoorRun(segments: [
-            RunSegment(intensity: .zone2, target: .time(seconds: 1800))
-        ])
+    }
+
+    @MainActor
+    private func countDownToWorkout(attemptID: UUID) async {
+        while startFlow.countdownAttemptID == attemptID {
+            WKInterfaceDevice.current().play(.click)
+            do {
+                try await Task.sleep(for: .seconds(1))
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
+            if let request = startFlow.advanceCountdown(attemptID: attemptID) {
+                isStartAttemptActive = true
+                workoutManager.startOutdoorRun(
+                    segments: request.segments,
+                    startAdaptiveMix: request.startAdaptiveMix
+                )
+                return
+            }
+        }
     }
 
     private func dismissPlan() {
-        guard !workoutManager.isStarting else { return }
+        guard !isPreparingToStart else { return }
         watchConnectivity.clearReceivedRunPlan()
     }
 }
@@ -165,6 +206,8 @@ private enum DebugWatchSimulatorRunController {
                 processInfo.environment[runEnvironmentKey] == "1" else {
             return
         }
+        // Keep synthetic metrics available while exercising the real start UI.
+        guard !processInfo.arguments.contains("--pancake-manual-start") else { return }
 
         guard !didStart else { return }
         didStart = true
@@ -179,7 +222,7 @@ private enum DebugWatchSimulatorRunController {
 
         let segments = WatchConnectivityManager.shared.receivedRunPlan
         PancakeSimulatorLog("PANCAKE_SIM: Watch received run plan segments=\(segments.count)")
-        WorkoutSessionManager.shared.startOutdoorRun(segments: segments)
+        WorkoutSessionManager.shared.startOutdoorRun(segments: segments, startAdaptiveMix: true)
 
         guard await waitForWorkoutToRun() else {
             PancakeSimulatorLog("PANCAKE_SIM: Watch timed out waiting for simulated workout start")
@@ -187,8 +230,20 @@ private enum DebugWatchSimulatorRunController {
         }
 
         try? await Task.sleep(nanoseconds: 2_000_000_000)
-        WatchConnectivityManager.shared.sendMusicControl("adaptiveMix")
         PancakeSimulatorLog("PANCAKE_SIM: Watch requested Adaptive Mix")
+
+        if processInfo.environment["PANCAKE_SIM_TRANSITION_TEST"] == "1" {
+            // Reproduce the reported seated run: no skip at the boundary,
+            // followed by manual skips at 1:20 and 1:25.
+            for skipTime in [80.0, 85.0] {
+                while WorkoutSessionManager.shared.isRunning && WorkoutSessionManager.shared.totalTime < skipTime {
+                    try? await Task.sleep(for: .milliseconds(250))
+                }
+                WatchConnectivityManager.shared.sendMusicControl("next")
+                PancakeSimulatorLog("PANCAKE_SIM: Watch requested next song at \(skipTime)")
+            }
+            return
+        }
 
         try? await Task.sleep(nanoseconds: 14_000_000_000)
         WatchConnectivityManager.shared.sendMusicControl("next")
@@ -282,9 +337,7 @@ struct WatchHealthSetupView: View {
 // MARK: - Waiting For Plan View
 struct WaitingForPlanView: View {
     let isReachable: Bool
-    let isStarting: Bool
     var isAwaitingPlanFromPhone: Bool = false
-    let onQuickRun: () -> Void
 
     var body: some View {
         ScrollView {
@@ -317,20 +370,10 @@ struct WaitingForPlanView: View {
                         .foregroundStyle(.secondary)
                 }
 
-                Button {
-                    onQuickRun()
-                } label: {
-                    Label("Quick Run", systemImage: "figure.run")
-                        .font(.headline)
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.green)
-                .disabled(isStarting)
-
-                Text("30 min easy run, no plan needed")
+                Text("Create a plan on iPhone, then tap Send run plan.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
             }
         }
         .navigationTitle("Pancake")
@@ -339,6 +382,7 @@ struct WaitingForPlanView: View {
 
 // MARK: - Received Plan View
 struct ReceivedPlanView: View {
+    @AppStorage(DistanceUnit.preferenceKey) private var distanceUnit: DistanceUnit = .kilometers
     let segments: [RunSegment]
     let isStarting: Bool
     let onStartWorkout: () -> Void
@@ -360,7 +404,7 @@ struct ReceivedPlanView: View {
                 )
                 SummaryRowView(
                     title: "Distance",
-                    value: totalDistanceMeters.formattedDistanceMeters(),
+                    value: totalDistanceMeters.formattedDistanceMeters(unit: distanceUnit),
                     icon: "ruler"
                 )
             }
@@ -417,6 +461,65 @@ struct ReceivedPlanView: View {
     }
 }
 
+// MARK: - Workout start flow
+
+private struct AdaptivePlaylistStartPrompt: View {
+    let onChoice: (Bool) -> Void
+    let onCancel: () -> Void
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 8) {
+                Text("Start adaptive playlist?")
+                    .font(.headline)
+                    .multilineTextAlignment(.center)
+
+                Button("Yes") { onChoice(true) }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.green)
+                    .accessibilityHint("Start the countdown and request Adaptive Mix for this run")
+
+                Button("No") { onChoice(false) }
+                    .buttonStyle(.bordered)
+                    .accessibilityHint("Start the countdown without Adaptive Mix")
+
+                Button("Cancel", action: onCancel)
+                    .buttonStyle(.plain)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 4)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+private struct WorkoutCountdownView: View {
+    let remaining: Int
+    let onCancel: () -> Void
+
+    var body: some View {
+        VStack(spacing: 8) {
+            Text("Get ready")
+                .font(.headline)
+
+            Text(remaining, format: .number)
+                .font(.system(size: 88, weight: .bold, design: .rounded))
+                .monospacedDigit()
+                .foregroundStyle(.green)
+                .contentTransition(.numericText(countsDown: true))
+                .accessibilityLabel("Starting in \(remaining)")
+
+            Button("Cancel", action: onCancel)
+                .buttonStyle(.plain)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
 // MARK: - Starting Workout View
 struct StartingWorkoutView: View {
     var body: some View {
@@ -441,6 +544,7 @@ struct StartingWorkoutView: View {
 
 // MARK: - Segment Row View
 struct SegmentRowView: View {
+    @AppStorage(DistanceUnit.preferenceKey) private var distanceUnit: DistanceUnit = .kilometers
     let segment: RunSegment
 
     var body: some View {
@@ -457,7 +561,7 @@ struct SegmentRowView: View {
                     .minimumScaleFactor(0.6)
                     .layoutPriority(1)
             case .distance(let meters):
-                Text(meters.formattedDistanceMeters())
+                Text(meters.formattedDistanceMeters(unit: distanceUnit))
                     .monospacedDigit()
                     .font(.footnote)
                     .lineLimit(1)
